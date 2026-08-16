@@ -17,7 +17,7 @@ carried across every release, and it is the patch that broke the first time
 upstream hardened its loopback gate.
 
 ```
-  phone ──LAN/tailnet──▶ companion :8800 ──loopback──▶ harness :8799
+  phone ──LAN/tailnet──▶ companion :8810 ──loopback──▶ harness :8799
                           ▲                             ▲
                           │ token, allowlist,           │ unmodified,
                           │ Origin refused              │ loopback-only
@@ -55,9 +55,9 @@ pnpm companion
 It prints where to point the phone, and where you pair:
 
 ```
-companion  http://0.0.0.0:8800  →  harness 127.0.0.1:8799
-pair here  http://127.0.0.1:8801
-on your phone, enter  macbook.tail1234.ts.net:8800
+companion  http://0.0.0.0:8810  →  harness 127.0.0.1:8799
+pair here  http://127.0.0.1:8811
+on your phone, enter  macbook.tail1234.ts.net:8810
 ```
 
 Open the pairing page, click **Start pairing**, and type the six digits into
@@ -67,10 +67,16 @@ opt-in, so there is no toggle to forget.
 | Environment | Default | |
 |---|---|---|
 | `OMB_PORT` | `8799` | where the harness is |
-| `OMB_COMPANION_PORT` | `8800` | where devices connect |
-| `OMB_CONTROL_PORT` | `8801` | the pairing page, loopback only |
+| `OMB_COMPANION_PORT` | `8810` | where devices connect |
+| `OMB_CONTROL_PORT` | `8811` | the pairing page, loopback only |
 | `OMB_COMPANION_DIR` | `~/.openmausbot-companion` | paired devices live here |
 | `OMB_COMPANION_NAME` | `OpenMausBot` | what the phone calls this computer |
+
+The harness owns two ports, not one: itself, and a webhook receiver one above
+it (`OMB_WEBHOOK_PORT`). The companion refuses to start on either and says
+which — the alternative is a race for the socket, where starting second means
+the companion will not come up and starting first means webhooks quietly stop
+working with the explanation logged somewhere else entirely.
 
 ## Layout
 

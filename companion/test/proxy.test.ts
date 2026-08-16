@@ -18,7 +18,9 @@ import { createProxyHandler } from "../src/proxy.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..", "..");
 const HARNESS_PORT = 19600 + Math.floor(Math.random() * 3000);
-const SIDECAR_PORT = HARNESS_PORT + 1;
+// +10, not +1: the harness opens its webhook receiver one port above itself,
+// and this file needs three consecutive free ports of its own.
+const SIDECAR_PORT = HARNESS_PORT + 10;
 const HARNESS = `http://127.0.0.1:${HARNESS_PORT}`;
 const SIDECAR = `http://127.0.0.1:${SIDECAR_PORT}`;
 

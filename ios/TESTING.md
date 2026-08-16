@@ -100,7 +100,7 @@ pnpm dev:desktop          # Electron
 In the app: **Settings → Companion**. Turn it on. You should see either
 
 - *"Your phone will find this computer as …"* — Bonjour is advertising, or
-- *"Listening on 192.168.x.x:8800 — enter that on your phone."* — it is not.
+- *"Listening on 192.168.x.x:8810 — enter that on your phone."* — it is not.
 
 Both are workable; the second just means typing an address. Then **Start
 pairing** and check the six-digit code counts down and cancels cleanly.
@@ -108,7 +108,7 @@ pairing** and check the six-digit code counts down and cancels cleanly.
 Verify from a second terminal that the socket is real and refuses strangers:
 
 ```sh
-curl -s http://192.168.x.x:8800/api/bots            # expect 401 + "pair this device…"
+curl -s http://192.168.x.x:8810/api/bots            # expect 401 + "pair this device…"
 curl -s http://127.0.0.1:8799/api/remote | jq       # enabled, discovery, devices
 dns-sd -B _openmausbot._tcp                         # macOS: should list the service
 ```
@@ -122,7 +122,7 @@ This is the likeliest snag on macOS, and it is not a bug in the phone.
   advertisement cannot start. `sudo lsof -i :5353` shows who.
 - **The firewall is prompting.** System Settings → Network → Firewall. Incoming
   connections to `node`/OpenMausBot must be allowed, or the phone reaches
-  nothing on 8800 even with a correct address.
+  nothing on 8810 even with a correct address.
 - Neither blocks testing: use the typed address instead. Discovery failing is
   designed to be a fallback, not a dead end — that is worth confirming too.
 
@@ -223,7 +223,7 @@ so this is also how the phone reaches the Mac over cellular.
 2. **On the phone:** install Tailscale from the App Store, sign in to the *same*
    account, and turn the VPN on.
 3. **In OpenMausBot → Settings → Companion:** with the toggle on, the panel now
-   prints the tailnet name — something like `macbook.tail1234.ts.net:8800`, with
+   prints the tailnet name — something like `macbook.tail1234.ts.net:8810`, with
    the LAN address listed separately underneath. If it still only shows a
    `192.168.x.x` address, the harness could not find the Tailscale CLI; restart
    `pnpm dev:server` after Tailscale is running.

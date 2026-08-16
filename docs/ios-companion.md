@@ -384,7 +384,7 @@ gate is satisfied by construction. **The harness needs no changes and does not
 know the sidecar exists.**
 
 ```
-  phone ──LAN/tailnet──▶ companion :8800 ──loopback──▶ harness :8799
+  phone ──LAN/tailnet──▶ companion :8810 ──loopback──▶ harness :8799
                           ▲                             ▲
                           │ token, allowlist,           │ unmodified,
                           │ Origin refused              │ loopback-only
@@ -404,7 +404,7 @@ way out. They are just implemented one process to the left.
   an event the moment it is complete and never touches the blank-line terminator
   or the `id:` line — both of which have silently broken this project before.
 - **The control surface is loopback-only and separate.** Pairing and revocation
-  are exactly what a phone must never reach, so they live on `127.0.0.1:8801`,
+  are exactly what a phone must never reach, so they live on `127.0.0.1:8811`,
   not on the socket devices talk to.
 
 **The cost, stated plainly.** Moving out of the harness meant losing Settings →

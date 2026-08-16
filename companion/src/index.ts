@@ -4,9 +4,14 @@
 //
 // Three sockets, and the split between them is the whole security model:
 //
-//   :8800  0.0.0.0    devices     token required, allowlisted, scrubbed
-//   :8801  127.0.0.1  you         pairing and revocation — never off-machine
+//   :8810  0.0.0.0    devices     token required, allowlisted, scrubbed
+//   :8811  127.0.0.1  you         pairing and revocation — never off-machine
 //   :8799  127.0.0.1  the harness spoken to as this machine, unmodified
+//
+// 8810 rather than 8800, which is where these started: the harness opens a
+// webhook receiver one port above its own, so 8800 is already taken by the
+// app this is a sidecar to. Ten clear of the harness leaves it room to add
+// another adjacent listener without taking this one out again.
 //
 // Running this process *is* the opt-in. There is no toggle, because a toggle
 // inside a process you chose to start would be ceremony: stopping it is the
@@ -25,9 +30,27 @@ const num = (value: string | undefined, fallback: number): number => {
 };
 
 const HARNESS_PORT = num(process.env.OMB_PORT, 8799);
-const COMPANION_PORT = num(process.env.OMB_COMPANION_PORT, 8800);
-const CONTROL_PORT = num(process.env.OMB_CONTROL_PORT, 8801);
+const WEBHOOK_PORT = num(process.env.OMB_WEBHOOK_PORT, HARNESS_PORT + 1);
+const COMPANION_PORT = num(process.env.OMB_COMPANION_PORT, 8810);
+const CONTROL_PORT = num(process.env.OMB_CONTROL_PORT, 8811);
 const SERVICE_TYPE = "_openmausbot._tcp";
+
+/** Ports the harness takes for itself, and what it uses each for.
+ *
+ * Checked up front rather than left to EADDRINUSE, because the collision is
+ * a race and the loser is whoever started second: bind first and the harness
+ * reports its webhook receiver unavailable instead, which surfaces nowhere
+ * near here. "Port 8800 is the webhook receiver" is a sentence someone can
+ * act on; "address already in use" sends them to `lsof`. */
+const HARNESS_PORTS = new Map([
+  [HARNESS_PORT, "the harness itself"],
+  [WEBHOOK_PORT, "the harness's webhook receiver"],
+]);
+
+const conflict = (name: string, port: number): string | null => {
+  const owner = HARNESS_PORTS.get(port);
+  return owner ? `${name} is set to port ${port}, which is ${owner}` : null;
+};
 
 /** What the phone sees this computer called.
  *
@@ -93,15 +116,12 @@ const listen = (server: ReturnType<typeof createServer>, port: number, host: str
   new Promise((resolve, reject) => {
     const onError = (error: NodeJS.ErrnoException) => {
       server.removeListener("listening", onListening);
-      // The overwhelmingly likely cause on the companion port, for as long
-      // as both exist, is the harness's own built-in companion listener —
-      // it defaults to the same port and is on if it was ever switched on.
-      // Saying "close whatever is using it" sends someone hunting through
-      // `lsof` for a thing that is one toggle away in an app they have open.
-      const hint =
-        port === COMPANION_PORT
-          ? ` — if OpenMausBot's built-in companion is on, turn it off in Settings → Companion; it uses this port too`
-          : "";
+      // A second copy of the sidecar is the usual cause once the harness's
+      // own ports are ruled out above, and "close whatever is using it"
+      // sends someone hunting through `lsof` for a process they started.
+      const hint = ` — another copy of the companion may already be running; ${
+        port === COMPANION_PORT ? "OMB_COMPANION_PORT" : "OMB_CONTROL_PORT"
+      } chooses a different one`;
       reject(
         error.code === "EADDRINUSE"
           ? new Error(`port ${port} is already in use${hint}`)
@@ -118,6 +138,10 @@ const listen = (server: ReturnType<typeof createServer>, port: number, host: str
   });
 
 async function main(): Promise<void> {
+  const clash =
+    conflict("OMB_COMPANION_PORT", COMPANION_PORT) ?? conflict("OMB_CONTROL_PORT", CONTROL_PORT);
+  if (clash) throw new Error(`${clash}. Pick another port.`);
+
   await listen(control, CONTROL_PORT, "127.0.0.1");
   await listen(companion, COMPANION_PORT, "0.0.0.0");
 

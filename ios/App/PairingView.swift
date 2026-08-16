@@ -98,14 +98,14 @@ struct PairingView: View {
 
     private var manualSection: some View {
         Section {
-            TextField("192.168.1.42:8800", text: $manualAddress)
+            TextField("192.168.1.42:8810", text: $manualAddress)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .keyboardType(.URL)
             Button("Continue") {
                 failure = nil
                 guard let connection = Self.parse(manualAddress) else {
-                    failure = "That should look like 192.168.1.42:8800."
+                    failure = "That should look like 192.168.1.42:8810."
                     return
                 }
                 chosen = connection
@@ -114,7 +114,7 @@ struct PairingView: View {
         } header: {
             Text("Or enter the address")
         } footer: {
-            Text("Whatever the Companion panel shows — an address on this network, or a Tailscale name like macbook.tail1234.ts.net:8800, which works from anywhere.")
+            Text("Whatever the Companion panel shows — an address on this network, or a Tailscale name like macbook.tail1234.ts.net:8810, which works from anywhere.")
         }
     }
 
@@ -182,7 +182,7 @@ struct PairingView: View {
         #endif
     }
 
-    /// "192.168.1.42:8800", or a bare host on the default companion port.
+    /// "192.168.1.42:8810", or a bare host on the default companion port.
     static func parse(_ text: String) -> Connection? {
         var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // people paste what they see, and what they see may be a URL
@@ -195,7 +195,10 @@ struct PairingView: View {
         let parts = trimmed.split(separator: ":")
         let host = String(parts[0])
         guard !host.isEmpty, !host.contains("/") else { return nil }
-        let port = parts.count > 1 ? Int(parts[1]) : 8800
+        // 8810 is the companion's default. It is not 8800, which is the
+        // harness's webhook receiver — a bare hostname sent there would get
+        // a 404 from a server that is not this one.
+        let port = parts.count > 1 ? Int(parts[1]) : 8810
         guard let port, (1...65535).contains(port) else { return nil }
         return Connection(name: host, host: host, port: port)
     }
