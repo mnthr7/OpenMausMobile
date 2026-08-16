@@ -34,6 +34,10 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
+        # The catalog lives in App/, which is already a source path. Generated
+        # by `node scripts/make-app-icon.mjs` from the same mascot the app
+        # draws, so the icon cannot drift from the thing it depicts.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: App/Info.plist
       properties:

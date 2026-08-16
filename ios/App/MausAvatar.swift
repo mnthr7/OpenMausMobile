@@ -165,7 +165,7 @@ enum MausSilhouette {
 /// A bot, at whatever size the row needs.
 struct MausAvatar: View {
     let color: String
-    var size: CGFloat = 34
+    var size: CGFloat = 52
 
     var body: some View {
         Canvas { context, canvasSize in
@@ -201,6 +201,29 @@ struct MausAvatar: View {
         }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
+    }
+}
+
+/// The person, not a bot — the roster header and the settings row. A letter
+/// rather than a mascot, deliberately: the mascots mean "this is a bot", and
+/// giving the human one too would blur the only distinction the roster makes.
+struct ProfileAvatar: View {
+    let name: String
+    var size: CGFloat = 34
+
+    var body: some View {
+        Circle()
+            .fill(MausPalette.color("green"))
+            .frame(width: size, height: size)
+            .overlay {
+                Text(initial)
+                    .font(.system(size: size * 0.45, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+    }
+
+    private var initial: String {
+        String(name.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased()
     }
 }
 
