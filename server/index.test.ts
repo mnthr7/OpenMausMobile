@@ -706,6 +706,22 @@ describe("companion listener", () => {
     expect(cold.body.error).toContain("pair");
   });
 
+  it("advertises itself under the profile's name while it is up", async () => {
+    const { body } = await api("GET", "/api/remote");
+    expect(body.discovery.type).toBe("_openmausbot._tcp");
+    // the profile set earlier in this file is what a phone's picker shows
+    expect(body.discovery.name).toBe("Ada Lovelace's computer");
+    // whether the advertisement actually bound depends on the network and
+    // on whatever else owns port 5353, so it is reported, not required
+    expect(typeof body.discovery.advertising).toBe("boolean");
+
+    // renaming the profile renames the service rather than leaving a stale
+    // name on the network
+    await api("PUT", "/api/config", { profile: { name: "Grace Hopper", email: "grace@example.com" } });
+    expect((await api("GET", "/api/remote")).body.discovery.name).toBe("Grace Hopper's computer");
+    await api("PUT", "/api/config", { profile: { name: "Ada Lovelace", email: "ada@example.com" } });
+  });
+
   it("pairs a phone with a code and issues a token exactly once", async () => {
     const opened = await api("POST", "/api/remote/pairing");
     expect(opened.status).toBe(201);

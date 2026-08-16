@@ -23,6 +23,8 @@ interface RemoteState {
   error?: string;
   pairing: { code: string; expiresAt: number } | null;
   devices: Device[];
+  /** Bonjour: when advertising, the phone finds this computer by name. */
+  discovery: { advertising: boolean; name: string; type: string };
 }
 
 const relative = (at: number) => {
@@ -102,11 +104,19 @@ export function CompanionSection() {
           <div className="min-w-0">
             <div className="text-[14px] text-ink">{state.enabled ? "On" : "Off"}</div>
             <div className="mt-0.5 text-[13px] text-ink-secondary">
-              {state.enabled
-                ? address
-                  ? `Listening on ${address}:${state.port}`
-                  : `Listening on port ${state.port} — no network address yet`
-                : "The harness stays on 127.0.0.1 only."}
+              {!state.enabled
+                ? "The harness stays on 127.0.0.1 only."
+                : !address
+                  ? `Listening on port ${state.port} — no network address yet.`
+                  : state.discovery?.advertising
+                    ? // The address is shown even when Bonjour is working.
+                      // Discovery can be advertising happily and still not
+                      // reach the phone — a guest network that isolates its
+                      // clients blocks multicast — and when that happens the
+                      // typed address is the way out. Hiding it behind a
+                      // failure the panel cannot detect is no help at all.
+                      `Your phone will find this computer as "${state.discovery.name}", or you can enter ${address}:${state.port}.`
+                    : `Listening on ${address}:${state.port} — enter that on your phone.`}
             </div>
           </div>
           <button
@@ -130,7 +140,9 @@ export function CompanionSection() {
           title="Pair a phone"
           subtitle={
             state.pairing
-              ? "Open OpenMausBot on your phone, choose this computer, and enter the code."
+              ? state.discovery?.advertising
+                ? "Open OpenMausBot on your phone, pick this computer from the list, and enter the code."
+                : "Open OpenMausBot on your phone, enter the address below, then the code."
               : "Start pairing, then enter the code on your phone. The code lasts two minutes."
           }
         >

@@ -24,6 +24,13 @@ import { ensureDirs, instanceConfigs, loadConfig, saveConfig, EVENTS_DIR, NATIVE
 import { bearerToken, DeviceRegistry } from "./devices.ts";
 import { resetPathCache } from "./env-path.ts";
 import { buildNotification, type Notification } from "./notify.ts";
+import {
+  advertisableAddresses,
+  defaultHostName,
+  dnsLabel,
+  MdnsResponder,
+  type ServiceInfo,
+} from "./mdns.ts";
 import { RemoteListener } from "./remote.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 
@@ -1171,6 +1178,36 @@ function isAllowedOrigin(origin: string | undefined | null): boolean {
 // The registry of paired phones, and the second listener they reach. Both
 // are inert until the user turns the companion on.
 const devices = new DeviceRegistry();
+// Bonjour: while the companion listener is up, the phone finds this
+// computer by name instead of by typed IP address.
+const mdns = new MdnsResponder();
+const SERVICE_TYPE = "_openmausbot._tcp";
+
+/** What this computer calls itself to a phone. */
+const serverName = () =>
+  cfg.profile?.name?.trim() ? `${cfg.profile.name.trim()}'s computer` : "OpenMausBot";
+
+function companionService(): ServiceInfo {
+  const name = serverName();
+  return {
+    // one DNS label: no dots, and inside the 63-byte limit
+    name: dnsLabel(name),
+    type: SERVICE_TYPE,
+    port: REMOTE_PORT,
+    host: defaultHostName(),
+    addresses: advertisableAddresses(),
+    // TXT entries cap at 255 bytes, and this one is user-supplied
+    txt: ["v=1", `name=${name.slice(0, 200)}`],
+  };
+}
+
+/** Advertise or withdraw, following the listener. Discovery failing (port
+ * 5353 taken by another responder, no multicast on this network) is not an
+ * error the user has to fix — pairing by typed address still works. */
+async function syncDiscovery(): Promise<void> {
+  if (remoteListener.running) await mdns.advertise(companionService());
+  else await mdns.stop();
+}
 
 /** What a request arriving on the companion listener is allowed to do.
  * Returns null when it may proceed, or the refusal to send.
@@ -1269,7 +1306,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, remote: boolean
         token: result.token,
         device: result.device,
         // so the phone can label the connection with something human
-        serverName: cfg.profile?.name?.trim() ? `${cfg.profile.name.trim()}'s computer` : "OpenMausBot",
+        serverName: serverName(),
       });
     }
 
@@ -1418,6 +1455,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, remote: boolean
     if (remoteMatch && method === "POST") {
       const on = remoteMatch[1] === "enable";
       const state = on ? await remoteListener.enable() : await remoteListener.disable();
+      await syncDiscovery();
       // Only remember a state we actually reached: persisting "enabled"
       // after a failed bind would retry the same broken port every boot.
       saveConfig({ remote: { enabled: state.enabled } });
@@ -2107,6 +2145,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, remote: boolean
       // kill in-flight turns with a pointless reload — no driver reads
       // either, and picking a voice mid-turn should be free
       if (Object.keys(patch).some((k) => k !== "profile" && k !== "tts")) await reloadProviders();
+      // the advertised name comes from the profile — re-announce rather
+      // than leave the old one on the network until the next toggle
+      if (patch.profile && remoteListener.running) await syncDiscovery();
       const status = configStatus();
       broadcast({ kind: "config", ...status });
       return json(res, 200, status);
@@ -2235,10 +2276,14 @@ const remoteListener = new RemoteListener((req, res) => void handle(req, res, tr
  * device tokens have no representation here at all. */
 function remoteState() {
   const pairing = devices.pairing();
+  const service = companionService();
   return {
     ...remoteListener.state(),
     pairing: pairing ? { code: pairing.code, expiresAt: pairing.expiresAt } : null,
     devices: devices.list(),
+    // discoverable = the phone can find this computer without being told
+    // where it is; false only means pairing needs the address typed
+    discovery: { advertising: mdns.advertising, name: service.name, type: SERVICE_TYPE },
   };
 }
 
@@ -2246,6 +2291,7 @@ server.listen(PORT, "127.0.0.1", async () => {
   console.log(`openmausbot server on http://127.0.0.1:${PORT}`);
   if (cfg.remote?.enabled) {
     const state = await remoteListener.enable();
+    await syncDiscovery();
     console.log(
       state.enabled
         ? `companion listener on http://0.0.0.0:${REMOTE_PORT} (${state.addresses.join(", ") || "no LAN address"})`
@@ -2257,6 +2303,7 @@ server.listen(PORT, "127.0.0.1", async () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     routines?.stop();
+    void mdns.stop().catch(() => {});
     void remoteListener.disable().catch(() => {});
     void registry.disposeAll().finally(() => process.exit(0));
   });
