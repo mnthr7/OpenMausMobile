@@ -10,9 +10,13 @@ import CompanionCore
 struct ChatListView: View {
     @EnvironmentObject private var session: Session
     @State private var query = ""
+    /// Driven so that making a bot can open it. Value-based navigation alone
+    /// cannot push without a tap, and a new bot appearing silently at the
+    /// bottom of the roster is a poor answer to pressing +.
+    @State private var path = NavigationPath()
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             // A hand-built header rather than the navigation bar. Two
             // reasons: `.searchable` anchors its field to the *bottom* of the
             // screen on iOS 26, which is not where a roster's search belongs,
@@ -103,6 +107,20 @@ struct ChatListView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(Capsule().fill(Color.secondary.opacity(0.16)))
+
+            // Same place the desktop puts it, top-right of the roster.
+            Button {
+                Task {
+                    if let bot = await session.createBot() { path.append(Chat.bot(bot)) }
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New bot")
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)

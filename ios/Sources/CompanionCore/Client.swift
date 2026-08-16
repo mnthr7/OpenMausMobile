@@ -187,6 +187,13 @@ public struct CompanionClient: Sendable {
 
     // MARK: - Doing
 
+    /// Make a new bot. The harness picks its name, colour and greeting — the
+    /// phone deliberately does not, so a bot created here is indistinguishable
+    /// from one created on the desktop.
+    public func createBot() async throws -> Bot {
+        try await send(try makeRequest("POST", "/api/bots"), as: CreatedBot.self).bot
+    }
+
     public func send(text: String, toBot botId: String) async throws {
         try await send(try makeRequest("POST", "/api/bots/\(botId)/messages", body: ["text": text]))
     }

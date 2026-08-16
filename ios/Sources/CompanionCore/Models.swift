@@ -257,3 +257,8 @@ public struct ScreenFrame: Hashable, Sendable {
     /// Returning nil rather than throwing keeps the caller a view.
     public var data: Data? { Data(base64Encoded: png) }
 }
+
+/// `POST /api/bots` — the harness answers with the bot it made.
+public struct CreatedBot: Codable, Sendable {
+    public var bot: Bot
+}

@@ -244,6 +244,26 @@ final class Session: ObservableObject {
         await perform { try await $0.alwaysAllow(botId: bot.id, keys: keys) }
     }
 
+    /// Make a new bot. The harness chooses its name, colour and greeting, so
+    /// one made here is indistinguishable from one made on the desktop.
+    ///
+    /// Creating a bot does not broadcast — the desktop adds it optimistically
+    /// too — so the new bot is folded in here rather than waited for. Return
+    /// it so the caller can open it, which is the only reason anyone taps the
+    /// button.
+    @discardableResult
+    func createBot() async -> Bot? {
+        guard let client else { return nil }
+        do {
+            let bot = try await client.createBot()
+            state.apply(.bot(bot))
+            return bot
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
     func interrupt(bot: Bot) async {
         await perform { try await $0.interrupt(botId: bot.id) }
     }
