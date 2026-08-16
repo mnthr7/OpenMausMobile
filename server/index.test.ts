@@ -405,6 +405,8 @@ describe("harness HTTP API", () => {
     const array = await api("PUT", "/api/config", { opencodeGo: [] });
     expect(array.status).toBe(400);
     expect(array.body.error).toContain("opencodeGo");
+  });
+
   it("never hands a client the provider session cursors", async () => {
     // resumeCursors is the harness's own bookkeeping. It reached clients for
     // a long time as harmless noise; once a phone is a client it is provider
@@ -794,6 +796,46 @@ describe("companion listener", () => {
 
     expect((await remote("GET", "/api/bots", { token })).status).toBe(401);
     expect((await api("DELETE", `/api/devices/${device.id}`)).status).toBe(404);
+  });
+
+  it("answers a phone whose Host is not loopback, and refuses a browser", async () => {
+    // The loopback server rejects any non-loopback Host, which defeats DNS
+    // rebinding. A phone's Host is *never* loopback — it dials a LAN address
+    // or a tailnet name — so applying that rule to the companion listener
+    // would 403 every device. What defends this socket instead is the token.
+    const token = await pairPhone("Host header phone");
+    for (const host of ["192.168.1.42:8800", "macbook.tail1234.ts.net:8800"]) {
+      const res = await new Promise<number>((resolve, reject) => {
+        const r = request(
+          {
+            hostname: "127.0.0.1",
+            port: REMOTE_PORT,
+            path: "/api/bots",
+            headers: { host, authorization: `Bearer ${token}` },
+          },
+          (response) => {
+            response.resume();
+            resolve(response.statusCode ?? 0);
+          },
+        );
+        r.on("error", reject);
+        r.end();
+      });
+      expect(res).toBe(200);
+    }
+
+    // A native app sends no Origin at all, so anything that does is a web
+    // page that has found this port — and has no business on it, token or
+    // not. Stricter here than the loopback rule, deliberately.
+    const browser = await fetch(`${REMOTE_BASE}/api/bots`, {
+      headers: { authorization: `Bearer ${token}`, origin: "https://evil.example" },
+    });
+    expect(browser.status).toBe(403);
+    // ...including an origin the loopback listener would have allowed
+    const loopbackOrigin = await fetch(`${REMOTE_BASE}/api/bots`, {
+      headers: { authorization: `Bearer ${token}`, origin: `http://127.0.0.1:${PORT}` },
+    });
+    expect(loopbackOrigin.status).toBe(403);
   });
 
   it("goes back down on request, dropping the socket", async () => {
