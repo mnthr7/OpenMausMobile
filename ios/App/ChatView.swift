@@ -150,6 +150,21 @@ struct ChatView: View {
                 .padding(.vertical, 5)
                 .background(Capsule().fill(Color.secondary.opacity(0.16)))
             }
+            if case let .bot(bot) = current {
+                // Rooms have no computer of their own — whichever member is
+                // speaking owns one, and picking for the reader would be a
+                // guess. Bots only.
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        ComputerView(bot: bot)
+                    } label: {
+                        Image(systemName: "display")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(Color.primary)
+                    }
+                    .accessibilityLabel("Watch \(bot.name)'s computer")
+                }
+            }
             if current.busy, case let .bot(bot) = current {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Stop") { Task { await session.interrupt(bot: bot) } }

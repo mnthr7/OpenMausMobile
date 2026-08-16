@@ -242,3 +242,18 @@ public struct ConfigStatus: Codable, Sendable {
 public struct APIErrorBody: Codable, Sendable {
     public var error: String
 }
+
+/// One frame of a bot's computer, as it arrives on the stream.
+public struct ScreenFrame: Hashable, Sendable {
+    public var png: String
+    public var mime: String
+
+    public init(png: String, mime: String) {
+        self.png = png
+        self.mime = mime
+    }
+
+    /// Decoded pixels, or nil if the base64 was not what it claimed to be.
+    /// Returning nil rather than throwing keeps the caller a view.
+    public var data: Data? { Data(base64Encoded: png) }
+}

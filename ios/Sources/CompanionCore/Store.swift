@@ -30,6 +30,11 @@ public struct CompanionState: Sendable {
     /// apart from `streaming` because it is not the answer — running them
     /// together reads as the bot contradicting itself mid-sentence.
     public var reasoning: [String: String] = [:]
+    /// The latest frame of each bot's computer, base64, while something is
+    /// watching. Only ever populated when the stream was opened with
+    /// `screens=on`, and only the newest frame is kept — these are hundreds
+    /// of kilobytes each and a history of them is worth nothing.
+    public var screens: [String: ScreenFrame] = [:]
 
     public init() {}
 
@@ -185,9 +190,12 @@ public struct CompanionState: Sendable {
         case let .runtime(event):
             apply(runtime: event)
 
-        // Nothing to fold: the phone asks for `screens=off`, and config and
-        // computer state are not part of this client's job yet.
-        case .screen, .computer, .config, .unknown:
+        case let .screen(botId, png, mime):
+            screens[botId] = ScreenFrame(png: png, mime: mime)
+
+        // Nothing to fold: config and provisioning state are not part of
+        // this client's job yet.
+        case .computer, .config, .unknown:
             break
         }
     }
@@ -218,6 +226,13 @@ public struct CompanionState: Sendable {
         default:
             break
         }
+    }
+
+    /// Forget a bot's screen. Called when the panel closes, so the next one
+    /// opens on a live frame rather than on however the desktop looked when
+    /// it was last watched.
+    public mutating func clearScreen(_ botId: String) {
+        screens.removeValue(forKey: botId)
     }
 
     /// Drop a thread's live text. The settled message that triggers this

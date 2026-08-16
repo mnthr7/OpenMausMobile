@@ -37,6 +37,10 @@ final class Session: ObservableObject {
     private var client: CompanionClient?
     private var streamTask: Task<Void, Never>?
     private var reconnectDelay: UInt64 = 0
+    /// How many computer panels are open. A count rather than a flag: the
+    /// panel can be pushed twice in a navigation stack, and the last one to
+    /// close is the one that should turn screens back off.
+    private var screenWatchers = 0
 
     private static let connectionKey = "companion.connection"
 
@@ -94,6 +98,35 @@ final class Session: ObservableObject {
         streamTask = Task { [weak self] in await self?.run() }
     }
 
+    /// Ask the harness to include this bot's computer in the stream, for as
+    /// long as something is showing it.
+    ///
+    /// This costs a reconnect, which is the right trade: the alternative is
+    /// a base64 desktop capture arriving every few seconds for the whole
+    /// session, including on cellular, whether or not anyone is looking.
+    /// The reconnect resumes from the cursor, so nothing is missed.
+    func watchScreen(of botId: String) {
+        screenWatchers += 1
+        if screenWatchers == 1 { restartStream() }
+    }
+
+    func stopWatchingScreen(of botId: String) {
+        screenWatchers = max(0, screenWatchers - 1)
+        if screenWatchers == 0 {
+            state.clearScreen(botId)
+            restartStream()
+        }
+    }
+
+    /// Reopen the stream so its query string matches what we now want. The
+    /// cursor survives, so this is a gap, not a reset.
+    private func restartStream() {
+        guard streamTask != nil else { return }
+        streamTask?.cancel()
+        streamTask = nil
+        connect()
+    }
+
     /// Called when the app leaves the screen. iOS will kill the connection
     /// anyway; dropping it deliberately means the cursor is written down at
     /// a known point instead of wherever the socket happened to die.
@@ -108,7 +141,13 @@ final class Session: ObservableObject {
             status = .connecting
             log.info("opening stream, cursor=\(self.state.cursor ?? "none", privacy: .public)")
             do {
-                for try await frame in try client.events(since: state.cursor) {
+                // The query is fixed when the connection opens, so changing
+                // it means a new connection — `restartStream()` cancels this
+                // task and starts another. Cancellation is the only exit;
+                // breaking out here instead would fall through to the "the
+                // harness went away" path and flash a lost-connection banner
+                // on what is actually a deliberate reconnect.
+                for try await frame in try client.events(since: state.cursor, screens: screenWatchers > 0) {
                     if Task.isCancelled { return }
                     reconnectDelay = 0
 

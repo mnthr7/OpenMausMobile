@@ -276,3 +276,48 @@ final class StreamingTests: XCTestCase {
         XCTAssertEqual(state.streaming["t2"], "for two", "one bot finishing must not silence another")
     }
 }
+
+// MARK: - The computer panel
+
+/// Screen frames are the one thing this client asks the server *not* to send
+/// by default — they are hundreds of kilobytes each and arrive every few
+/// seconds. These pin the fold; the turning-on is the session's job.
+final class ScreenTests: XCTestCase {
+    private func frame(_ png: String, bot: String = "b1") -> Frame {
+        .screen(botId: bot, png: png, mime: "image/png")
+    }
+
+    func testOnlyTheNewestFrameIsKept() {
+        // A history of desktop captures is worth nothing and costs megabytes.
+        var state = CompanionState()
+        state.apply(frame("AAAA"))
+        state.apply(frame("BBBB"))
+        state.apply(frame("CCCC"))
+        XCTAssertEqual(state.screens["b1"]?.png, "CCCC")
+        XCTAssertEqual(state.screens.count, 1)
+    }
+
+    func testBotsAreTrackedSeparately() {
+        var state = CompanionState()
+        state.apply(frame("one", bot: "b1"))
+        state.apply(frame("two", bot: "b2"))
+        XCTAssertEqual(state.screens["b1"]?.png, "one")
+        XCTAssertEqual(state.screens["b2"]?.png, "two")
+    }
+
+    func testClosingThePanelForgetsTheFrame() {
+        // Otherwise the panel reopens on however the desktop looked last
+        // time, which reads as a live view of a stale moment.
+        var state = CompanionState()
+        state.apply(frame("stale"))
+        state.clearScreen("b1")
+        XCTAssertNil(state.screens["b1"])
+    }
+
+    func testBadBase64DecodesToNilRatherThanCrashing() {
+        let good = ScreenFrame(png: "aGVsbG8=", mime: "image/png")
+        XCTAssertEqual(good.data.map { String(decoding: $0, as: UTF8.self) }, "hello")
+        // the view treats nil as "no frame yet", which is the right fallback
+        XCTAssertNil(ScreenFrame(png: "not base64 at all!!", mime: "image/png").data)
+    }
+}
