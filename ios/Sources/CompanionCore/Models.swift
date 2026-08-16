@@ -68,10 +68,34 @@ public struct CommChip: Codable, Hashable, Sendable {
 public struct Message: Codable, Hashable, Identifiable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case text, options, activity, screen
+        /// A kind this build has never heard of.
+        ///
+        /// Not decorative. `kind` is not optional, so without this a single
+        /// unrecognised message fails the decode of the whole response it
+        /// arrived in — the thread does not render one message oddly, it
+        /// does not render. The harness gains message kinds on its own
+        /// schedule and the phone is updated on the App Store's, so "newer
+        /// computer than phone" is the normal state of things, not an edge
+        /// case. Degrading to the text a message carries is worth more than
+        /// being right about its shape.
+        case unknown
+
+        public init(from decoder: any Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Kind(rawValue: raw) ?? .unknown
+        }
     }
 
     public enum Role: String, Codable, Sendable {
         case bot, user
+
+        /// Same reasoning, and `bot` rather than a third case: an unplaceable
+        /// message drawn as yours would be the phone claiming you said
+        /// something you did not.
+        public init(from decoder: any Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Role(rawValue: raw) ?? .bot
+        }
     }
 
     public var id: String

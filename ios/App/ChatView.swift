@@ -251,6 +251,15 @@ struct MessageRow: View {
             ActivityChip(tool: message.tool)
         case .screen:
             ScreenShot(threadId: chat.threadId, message: message)
+        case .unknown:
+            // A message kind from a newer computer. Almost everything the
+            // harness sends carries `text`, so showing it is usually the
+            // whole message and always better than a gap in the transcript.
+            // When there is nothing to show, show nothing — a placeholder
+            // saying "unsupported" is a worse gap than the gap.
+            if let text = message.text, !text.isEmpty {
+                TextBubble(message: message)
+            }
         }
     }
 }

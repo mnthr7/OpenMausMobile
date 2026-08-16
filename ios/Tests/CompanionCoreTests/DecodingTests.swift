@@ -210,4 +210,60 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(notification.threadId, "t1")
         XCTAssertEqual(frame.frame.threadId, "t1")
     }
+
+    // MARK: - A newer computer than the phone
+
+    // The harness gains message kinds when it ships; the phone gains them
+    // when the App Store gets round to it. So the phone talking to a newer
+    // computer is the ordinary case, and it must survive one.
+
+    func testAnUnknownMessageKindDecodes() throws {
+        let json = """
+        {"id":"m1","role":"bot","kind":"webhook","at":1,"text":"Stripe fired"}
+        """
+        let message = try JSONDecoder().decode(Message.self, from: Data(json.utf8))
+        XCTAssertEqual(message.kind, .unknown)
+        // and keeps what it can show
+        XCTAssertEqual(message.text, "Stripe fired")
+    }
+
+    func testAnUnknownRoleIsNotAttributedToYou() throws {
+        let json = """
+        {"id":"m1","role":"system","kind":"text","at":1,"text":"hello"}
+        """
+        let message = try JSONDecoder().decode(Message.self, from: Data(json.utf8))
+        XCTAssertEqual(message.role, .bot)
+    }
+
+    /// The one that matters. `kind` is not optional, so before this a single
+    /// unrecognised message failed the decode of the entire response — the
+    /// thread did not render one message oddly, it did not render.
+    func testOneUnknownMessageDoesNotSinkThePage() throws {
+        let json = """
+        {"messages":[
+          {"id":"m1","role":"user","kind":"text","at":1,"text":"go"},
+          {"id":"m2","role":"bot","kind":"something-new","at":2,"text":"working"},
+          {"id":"m3","role":"bot","kind":"text","at":3,"text":"done"}
+        ],"hasMore":false}
+        """
+        let page = try JSONDecoder().decode(ThreadPage.self, from: Data(json.utf8))
+        XCTAssertEqual(page.messages.count, 3)
+        XCTAssertEqual(page.messages.map(\.kind), [.text, .unknown, .text])
+        XCTAssertEqual(page.messages.map(\.id), ["m1", "m2", "m3"])
+    }
+
+    /// Same page, arriving one message at a time down the stream.
+    func testAnUnknownMessageArrivesOverTheStream() throws {
+        let json = """
+        {"kind":"message","seq":3,"threadId":"t1",
+         "message":{"id":"m9","role":"bot","kind":"routine.run","at":9,"text":"ran"}}
+        """
+        let frame = try JSONDecoder().decode(StreamFrame.self, from: Data(json.utf8))
+        guard case let .message(threadId, message) = frame.frame else {
+            return XCTFail("expected .message, got \(frame.frame)")
+        }
+        XCTAssertEqual(threadId, "t1")
+        XCTAssertEqual(message.kind, .unknown)
+        XCTAssertEqual(message.text, "ran")
+    }
 }

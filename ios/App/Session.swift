@@ -389,6 +389,7 @@ extension CompanionState {
         case .options: return last.card?.isPending == true ? "Waiting on you" : (last.card?.title ?? "")
         case .activity: return last.tool?.name ?? ""
         case .screen: return "Screenshot"
+        case .unknown: return last.text ?? ""
         }
     }
 }
