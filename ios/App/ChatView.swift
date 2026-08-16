@@ -17,6 +17,10 @@ struct ChatView: View {
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
 
+    /// The live bubble's scroll target. A constant because there is at most
+    /// one per chat and it has no message id to borrow.
+    static let liveBubbleId = "companion.live"
+
     private var messages: [Message] {
         session.state.transcript(forThread: chat.threadId)
     }
@@ -79,6 +83,22 @@ struct ChatView: View {
                             }
                             .id(message.id)
                         }
+
+                        // The reply as it is typed. It sits after the last
+                        // settled message and disappears the moment the real
+                        // one arrives — the store clears it on the same frame
+                        // that appends the message, so there is never a beat
+                        // where both are on screen.
+                        if let live = session.state.streaming[chat.threadId], !live.isEmpty {
+                            StreamingBubble(text: live, reasoning: nil)
+                                .id(Self.liveBubbleId)
+                        } else if let thinking = session.state.reasoning[chat.threadId], !thinking.isEmpty {
+                            // Only while there is no answer yet. Once tokens
+                            // of the reply exist, the reasoning is behind us
+                            // and showing both is just noise.
+                            StreamingBubble(text: nil, reasoning: thinking)
+                                .id(Self.liveBubbleId)
+                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
@@ -91,6 +111,14 @@ struct ChatView: View {
                 .onChange(of: messages.count) { _, _ in
                     guard let last = messages.last else { return }
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+                // Follow the text as it arrives. Keyed on length rather than
+                // the string so this fires once per delta batch, and without
+                // animation — animating every token turns a smooth stream
+                // into a stutter, because each scroll interrupts the last.
+                .onChange(of: session.state.streaming[chat.threadId]?.count ?? 0) { _, length in
+                    guard length > 0 else { return }
+                    proxy.scrollTo(Self.liveBubbleId, anchor: .bottom)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -370,5 +398,56 @@ struct ScreenShot: View {
                 data = await session.image(threadId: threadId, messageId: message.id)
             }
         }
+    }
+}
+
+/// The reply as it is being typed, styled to match the settled bubble it is
+/// about to become — the handover should be invisible, and any difference in
+/// padding or corner radius reads as the message jumping on arrival.
+///
+/// A caret rather than a spinner: a spinner says "something is happening
+/// somewhere", which the reader already knows. A caret at the end of real
+/// text says how far along it is.
+///
+/// The caret does not blink, deliberately. The obvious way to blink it —
+/// `withAnimation(.repeatForever) { flag.toggle() }` in `onAppear` — animates
+/// the change once and then sits still, and a caret that blinks twice and
+/// stops looks more broken than one that never blinks. A correct version
+/// animates opacity on a separate view, which needs a device to get right;
+/// static is honest until then.
+struct StreamingBubble: View {
+    let text: String?
+    let reasoning: String?
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                if let reasoning, !reasoning.isEmpty, text?.isEmpty != false {
+                    // Quieter and smaller than an answer, because it is not
+                    // one. Tail-limited: reasoning runs to thousands of words
+                    // and the part worth seeing is always the end.
+                    Text(String(reasoning.suffix(400)))
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let text, !text.isEmpty {
+                    (Text(text).foregroundStyle(Color.primary)
+                        + Text("\u{2007}▍").foregroundStyle(Color.secondary))
+                        .font(.system(size: 17))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.secondary.opacity(0.13))
+            )
+            Spacer(minLength: 44)
+        }
+        // No `.textSelection` on purpose: selecting text that is still growing
+        // fights the reader, and the settled bubble a frame later is
+        // selectable anyway.
     }
 }

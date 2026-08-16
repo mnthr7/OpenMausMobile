@@ -194,3 +194,85 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(state.bots.count, before)
     }
 }
+
+// MARK: - Live text
+
+/// The harness relays raw provider deltas alongside the settled messages it
+/// folds. These pin the handover between the two, which is where every
+/// streaming bug in this project's desktop client has lived.
+final class StreamingTests: XCTestCase {
+    private func delta(_ text: String, thread: String = "t1", kind: String = "assistant_text") -> Frame {
+        .runtime(RuntimeEvent(type: "content.delta", threadId: thread, delta: text, streamKind: kind))
+    }
+
+    func testDeltasAccumulateIntoLiveText() {
+        var state = CompanionState()
+        state.apply(delta("Hel"))
+        state.apply(delta("lo, "))
+        state.apply(delta("world"))
+        XCTAssertEqual(state.streaming["t1"], "Hello, world")
+    }
+
+    func testReasoningIsKeptApartFromTheAnswer() {
+        var state = CompanionState()
+        state.apply(delta("thinking…", kind: "reasoning_text"))
+        state.apply(delta("the answer"))
+        XCTAssertEqual(state.reasoning["t1"], "thinking…")
+        XCTAssertEqual(state.streaming["t1"], "the answer")
+    }
+
+    func testAnUnknownStreamKindIsDroppedRatherThanGuessedAt() {
+        var state = CompanionState()
+        state.apply(delta("???", kind: "some_future_kind"))
+        XCTAssertNil(state.streaming["t1"])
+        XCTAssertNil(state.reasoning["t1"])
+    }
+
+    func testASettledReplyReplacesTheLiveText() {
+        // The bug this prevents: the live bubble surviving next to the real
+        // one, so the tail renders below whatever settled after it and the
+        // next turn's deltas append onto a duplicated fragment.
+        var state = CompanionState()
+        state.apply(delta("partial answer"))
+        XCTAssertNotNil(state.streaming["t1"])
+
+        state.apply(.message(threadId: "t1", message: Message(
+            id: "m1", role: .bot, kind: .text, at: 1, text: "partial answer, completed"
+        )))
+        XCTAssertNil(state.streaming["t1"], "the settled message already contains those tokens")
+        XCTAssertEqual(state.transcript(forThread: "t1").count, 1)
+    }
+
+    func testOnlyASettledBotReplyClearsIt() {
+        var state = CompanionState()
+        state.apply(delta("mid-answer"))
+        // the user's own message, and a tool chip, both land mid-turn
+        state.apply(.message(threadId: "t1", message: Message(
+            id: "u1", role: .user, kind: .text, at: 1, text: "another question"
+        )))
+        state.apply(.message(threadId: "t1", message: Message(
+            id: "a1", role: .bot, kind: .activity, at: 2
+        )))
+        XCTAssertEqual(state.streaming["t1"], "mid-answer", "neither of those is the reply")
+    }
+
+    func testTheTurnEndingClearsEvenWithoutASettledMessage() {
+        // A failed or interrupted turn may never produce one. Leaving the
+        // caret blinking forever is the failure mode worth avoiding.
+        for ending in ["turn.completed", "turn.failed", "turn.aborted"] {
+            var state = CompanionState()
+            state.apply(delta("half a sentence"))
+            state.apply(.runtime(RuntimeEvent(type: ending, threadId: "t1", delta: nil, streamKind: nil)))
+            XCTAssertNil(state.streaming["t1"], "\(ending) should end the live bubble")
+        }
+    }
+
+    func testThreadsStreamIndependently() {
+        var state = CompanionState()
+        state.apply(delta("for one", thread: "t1"))
+        state.apply(delta("for two", thread: "t2"))
+        state.apply(.runtime(RuntimeEvent(type: "turn.completed", threadId: "t1", delta: nil, streamKind: nil)))
+        XCTAssertNil(state.streaming["t1"])
+        XCTAssertEqual(state.streaming["t2"], "for two", "one bot finishing must not silence another")
+    }
+}

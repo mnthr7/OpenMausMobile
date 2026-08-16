@@ -21,6 +21,15 @@ public struct CompanionState: Sendable {
     public var cursor: String?
     /// Notifications that arrived while connected, newest last.
     public var notifications: [NotificationFrame] = []
+    /// The reply being typed, per thread — cleared when it settles into a
+    /// `Message`. Not persisted and not hydrated: it is what is happening
+    /// right now, and a reconnect that missed it gets the settled message
+    /// instead, which is strictly better.
+    public var streaming: [String: String] = [:]
+    /// The bot's reasoning, per thread, when the provider emits it. Kept
+    /// apart from `streaming` because it is not the answer — running them
+    /// together reads as the bot contradicting itself mid-sentence.
+    public var reasoning: [String: String] = [:]
 
     public init() {}
 
@@ -102,6 +111,15 @@ public struct CompanionState: Sendable {
 
         case let .message(threadId, message):
             append(message, to: threadId)
+            // A settled reply supersedes whatever was streaming into it.
+            // Without this the live bubble survives alongside the real one:
+            // the tail renders below any card or chip that settled next, and
+            // the next block's deltas append onto the duplicated tail
+            // instead of starting fresh. The desktop client learned this the
+            // hard way; no reason to learn it twice.
+            if message.role == .bot, message.kind == .text {
+                clearStream(threadId)
+            }
 
         case let .messagePatch(threadId, message):
             var thread = messages[threadId] ?? []
@@ -164,12 +182,49 @@ public struct CompanionState: Sendable {
         case let .notify(notification):
             notifications.append(notification)
 
-        // Nothing to fold: the phone asks for `screens=off`, the server has
-        // already folded runtime events into messages, and config and
+        case let .runtime(event):
+            apply(runtime: event)
+
+        // Nothing to fold: the phone asks for `screens=off`, and config and
         // computer state are not part of this client's job yet.
-        case .screen, .computer, .config, .runtime, .unknown:
+        case .screen, .computer, .config, .unknown:
             break
         }
+    }
+
+    /// Live text, before the server has settled it into a `Message`.
+    ///
+    /// The harness folds provider events into settled messages and also
+    /// relays the raw deltas, so a client can have the reply as it is typed
+    /// and the authoritative record when the turn ends. Rendering only the
+    /// settled message — which is what this did until now — means a long
+    /// answer looks like nothing is happening for thirty seconds.
+    private mutating func apply(runtime event: RuntimeEvent) {
+        switch event.type {
+        case "content.delta":
+            guard let delta = event.delta, !delta.isEmpty else { return }
+            switch event.streamKind {
+            case "assistant_text":
+                streaming[event.threadId, default: ""] += delta
+            case "reasoning_text":
+                reasoning[event.threadId, default: ""] += delta
+            default:
+                // an unknown stream kind is not ours to guess at; dropping it
+                // is better than showing thinking as if it were the answer
+                break
+            }
+        case "turn.completed", "turn.failed", "turn.aborted":
+            clearStream(event.threadId)
+        default:
+            break
+        }
+    }
+
+    /// Drop a thread's live text. The settled message that triggers this
+    /// already contains every token it held.
+    public mutating func clearStream(_ threadId: String) {
+        streaming.removeValue(forKey: threadId)
+        reasoning.removeValue(forKey: threadId)
     }
 
     /// Append, unless we already hold it. Replaying a resumed stream can
