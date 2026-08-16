@@ -1,0 +1,200 @@
+// The client's state, and the fold that maintains it.
+//
+// This mirrors the reducer in `src/state/store.tsx`, and is deliberately a
+// plain struct with a pure `apply(_:)` rather than anything observable: the
+// fold is the part worth testing, and it should be testable without a
+// server, a socket, or a UI.
+//
+// The harness has already turned provider events into settled messages, so
+// the work here is small — append, patch, replace. That is the whole reason
+// a phone client is a weekend of work rather than a rewrite.
+import Foundation
+
+public struct CompanionState: Sendable {
+    public var bots: [Bot] = []
+    public var rooms: [Room] = []
+    /// Transcripts by thread, which is the key both bots and rooms share.
+    public var messages: [String: [Message]] = [:]
+    /// Whether there is more transcript above what we hold, per thread.
+    public var hasMore: [String: Bool] = [:]
+    /// The last frame we folded — what a reconnect resumes from.
+    public var cursor: String?
+    /// Notifications that arrived while connected, newest last.
+    public var notifications: [NotificationFrame] = []
+
+    public init() {}
+
+    // MARK: - Reading
+
+    /// Named `transcript`, not `messages`: sharing a base name with the
+    /// stored property compiles but reads as if one shadows the other.
+    public func transcript(forThread threadId: String) -> [Message] {
+        messages[threadId] ?? []
+    }
+
+    public func bot(_ id: String) -> Bot? {
+        bots.first { $0.id == id }
+    }
+
+    public func bot(forThread threadId: String) -> Bot? {
+        bots.first { $0.threadId == threadId }
+    }
+
+    public func room(forThread threadId: String) -> Room? {
+        rooms.first { $0.threadId == threadId }
+    }
+
+    /// Every unanswered approval or question, newest first. This is the
+    /// screen the whole companion exists for.
+    public var pendingApprovals: [(threadId: String, message: Message)] {
+        var out: [(threadId: String, message: Message)] = []
+        for (threadId, thread) in messages {
+            for message in thread where message.card?.isPending == true {
+                out.append((threadId: threadId, message: message))
+            }
+        }
+        return out.sorted { $0.message.at > $1.message.at }
+    }
+
+    /// Chats worth a badge.
+    public var unreadCount: Int {
+        bots.filter { $0.unread && $0.hidden != true }.count + rooms.filter(\.unread).count
+    }
+
+    // MARK: - Hydrating
+
+    /// Replace everything from a `GET /api/bots` response.
+    public mutating func hydrate(_ fleet: Fleet) {
+        bots = fleet.bots
+        rooms = fleet.groups
+        messages.removeAll()
+        hasMore.removeAll()
+        for bot in fleet.bots {
+            messages[bot.threadId] = bot.messages ?? []
+            hasMore[bot.threadId] = bot.hasMore ?? false
+        }
+        for room in fleet.groups {
+            messages[room.threadId] = room.messages ?? []
+            hasMore[room.threadId] = room.hasMore ?? false
+        }
+    }
+
+    /// Prepend an older page fetched for scrollback.
+    public mutating func prepend(_ page: ThreadPage, toThread threadId: String) {
+        let existing = messages[threadId] ?? []
+        let known = Set(existing.map(\.id))
+        messages[threadId] = page.messages.filter { !known.contains($0.id) } + existing
+        hasMore[threadId] = page.hasMore ?? false
+    }
+
+    // MARK: - Folding
+
+    public mutating func apply(_ streamFrame: StreamFrame) {
+        apply(streamFrame.frame)
+    }
+
+    public mutating func apply(_ frame: Frame) {
+        switch frame {
+        case let .hello(cursor, _):
+            // The caller decides what to do about `resumed`; either way this
+            // is where we now are in the stream.
+            self.cursor = cursor
+
+        case let .message(threadId, message):
+            append(message, to: threadId)
+
+        case let .messagePatch(threadId, message):
+            var thread = messages[threadId] ?? []
+            if let index = thread.firstIndex(where: { $0.id == message.id }) {
+                thread[index] = message
+                messages[threadId] = thread
+            } else {
+                // a patch for something we never saw — the append is more
+                // useful than dropping it, and dedupes on id anyway
+                append(message, to: threadId)
+            }
+
+        case let .thread(threadId, activeLeafId):
+            if let index = bots.firstIndex(where: { $0.threadId == threadId }) {
+                bots[index].activeLeafId = activeLeafId
+            }
+
+        case let .bot(bot):
+            // Frames carry the bot record without its transcript, so merge
+            // rather than replace: assigning would wipe the messages the
+            // hydrate put there.
+            if let index = bots.firstIndex(where: { $0.id == bot.id }) {
+                var merged = bot
+                merged.messages = bots[index].messages
+                merged.activeLeafId = bot.activeLeafId ?? bots[index].activeLeafId
+                bots[index] = merged
+            } else {
+                bots.append(bot)
+                if messages[bot.threadId] == nil {
+                    messages[bot.threadId] = bot.messages ?? []
+                }
+            }
+
+        case let .botDeleted(botId):
+            if let index = bots.firstIndex(where: { $0.id == botId }) {
+                messages.removeValue(forKey: bots[index].threadId)
+                hasMore.removeValue(forKey: bots[index].threadId)
+                bots.remove(at: index)
+            }
+
+        case let .room(room):
+            if let index = rooms.firstIndex(where: { $0.id == room.id }) {
+                var merged = room
+                merged.messages = rooms[index].messages
+                rooms[index] = merged
+            } else {
+                rooms.append(room)
+                if messages[room.threadId] == nil {
+                    messages[room.threadId] = room.messages ?? []
+                }
+            }
+
+        case let .roomDeleted(groupId):
+            if let index = rooms.firstIndex(where: { $0.id == groupId }) {
+                messages.removeValue(forKey: rooms[index].threadId)
+                hasMore.removeValue(forKey: rooms[index].threadId)
+                rooms.remove(at: index)
+            }
+
+        case let .notify(notification):
+            notifications.append(notification)
+
+        // Nothing to fold: the phone asks for `screens=off`, the server has
+        // already folded runtime events into messages, and config and
+        // computer state are not part of this client's job yet.
+        case .screen, .computer, .config, .runtime, .unknown:
+            break
+        }
+    }
+
+    /// Append, unless we already hold it. Replaying a resumed stream can
+    /// legitimately deliver a message twice — the cursor is the last frame
+    /// *received*, and a frame in flight when the socket dropped arrives
+    /// again on reconnect.
+    private mutating func append(_ message: Message, to threadId: String) {
+        var thread = messages[threadId] ?? []
+        if let index = thread.firstIndex(where: { $0.id == message.id }) {
+            thread[index] = message
+        } else {
+            thread.append(message)
+        }
+        messages[threadId] = thread
+    }
+}
+
+extension CompanionState {
+    /// Advance the cursor to a frame's sequence, keeping the stream id.
+    ///
+    /// The cursor is `<streamId>:<seq>` and opaque to us except for this:
+    /// the id half must be carried forward, because it is what stops the
+    /// server replaying a previous run's frames into our state.
+    public mutating func advance(to seq: Int?) {
+        guard let seq, let cursor, let streamId = cursor.split(separator: ":").first else { return }
+        self.cursor = "\(streamId):\(seq)"
+    }
+}
