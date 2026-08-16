@@ -269,11 +269,21 @@ struct TextBubble: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(MausPalette.color(from.color))
                 }
-                Text(message.text ?? "")
-                    .font(.system(size: 17))
-                    .foregroundStyle(Color.primary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Bots get markdown, you do not — the same split the desktop
+                // makes. Markdown you did not intend is worse than markdown
+                // you did: a message about `**` should show the asterisks.
+                if mine {
+                    Text(message.text ?? "")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Color.primary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    MarkdownText(source: message.text ?? "")
+                        .foregroundStyle(Color.primary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -441,16 +451,25 @@ struct StreamingBubble: View {
                     // Quieter and smaller than an answer, because it is not
                     // one. Tail-limited: reasoning runs to thousands of words
                     // and the part worth seeing is always the end.
+                    //
+                    // Plain text, unlike the answer: the tail cut lands
+                    // wherever it lands, and rendering markdown that starts
+                    // mid-syntax invents structure the model did not write.
                     Text(String(reasoning.suffix(400)))
                         .font(.system(size: 14))
                         .foregroundStyle(Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let text, !text.isEmpty {
-                    (Text(text).foregroundStyle(Color.primary)
-                        + Text("\u{2007}▍").foregroundStyle(Color.secondary))
-                        .font(.system(size: 17))
-                        .fixedSize(horizontal: false, vertical: true)
+                    // Same renderer as the settled bubble, for the same
+                    // reason as the padding: a live reply showing `**bold**`
+                    // that snaps to bold on arrival is the message jumping,
+                    // just in a different dimension. The parser tolerates the
+                    // half-finished markdown this is always holding — an
+                    // unclosed fence renders as code, an unclosed link as the
+                    // characters typed so far.
+                    MarkdownText(source: text, caret: true)
+                        .foregroundStyle(Color.primary)
                 }
             }
             .padding(.horizontal, 16)
