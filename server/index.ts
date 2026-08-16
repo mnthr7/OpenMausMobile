@@ -21,8 +21,10 @@ import {
   type LifecycleAction,
 } from "./container-computer.ts";
 import { ensureDirs, instanceConfigs, loadConfig, saveConfig, EVENTS_DIR, NATIVE_DIR } from "./config.ts";
+import { bearerToken, DeviceRegistry } from "./devices.ts";
 import { resetPathCache } from "./env-path.ts";
 import { buildNotification, type Notification } from "./notify.ts";
+import { RemoteListener } from "./remote.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
@@ -39,6 +41,10 @@ import { RoutineManager, type RoutineRunOn } from "./routines.ts";
 import { createTeamManifest, parseTeamManifest } from "./team-manifest.ts";
 
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
+// The companion listener gets its own port: 0.0.0.0 and 127.0.0.1 cannot
+// both hold the same one, and a separate port keeps "which socket did this
+// arrive on" answerable without inspecting addresses.
+const REMOTE_PORT = Number(process.env.OMB_REMOTE_PORT || PORT + 1);
 const STATIC_DIR = process.env.OMB_STATIC_DIR || null;
 const MIME: Record<string, string> = {
   ".html": "text/html",
@@ -1149,21 +1155,112 @@ function isAllowedOrigin(origin: string | undefined | null): boolean {
   }
 }
 
-const server = createServer(async (req, res) => {
+// ── companion devices ──────────────────────────────────────────────────
+// The registry of paired phones, and the second listener they reach. Both
+// are inert until the user turns the companion on.
+const devices = new DeviceRegistry();
+
+/** What a request arriving on the companion listener is allowed to do.
+ * Returns null when it may proceed, or the refusal to send.
+ *
+ * The default is deny: this answers with an explicit allowance per route
+ * family, so a route added later is closed to phones until someone decides
+ * otherwise. */
+function remoteDenial(
+  req: IncomingMessage,
+  path: string,
+  method: string,
+): { status: number; error: string } | null {
+  // Pairing is the one thing a phone does before it has a credential.
+  if (method === "POST" && path === "/api/pair") return null;
+
+  if (!devices.authenticate(bearerToken(req.headers.authorization))) {
+    return { status: 401, error: "pair this device in OpenMausBot → Settings → Companion" };
+  }
+
+  // The peer-agent comms endpoints are for a proxy running inside an agent
+  // process on this machine. Off-machine they simply do not exist.
+  if (path.startsWith("/api/internal/")) return { status: 404, error: `no route: ${method} ${path}` };
+
+  // A phone may not manage the companion itself: not enabling it, not
+  // opening a pairing window, and not revoking the other paired devices.
+  // Losing the phone must not mean losing the ability to lock it out.
+  if (path === "/api/remote" || path.startsWith("/api/remote/") || path.startsWith("/api/devices")) {
+    return { status: 403, error: "companion settings are managed on your computer" };
+  }
+
+  // Credentials stay on the machine that holds them. Reading the
+  // configured-or-not booleans is fine; writing keys is not.
+  if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
+    return { status: 403, error: "API keys can only be changed on your computer" };
+  }
+
+  // Local VM lifecycle is a host operation (pulling images, starting
+  // containers) and its CSRF guard assumes a loopback caller.
+  if (path.startsWith("/api/local-computer/")) {
+    return { status: 403, error: "the Local VM is set up on your computer" };
+  }
+
+  // The packaged UI is served to the desktop window, not to the network.
+  if (!path.startsWith("/api/")) return { status: 404, error: `no route: ${method} ${path}` };
+
+  return null;
+}
+
+async function handle(req: IncomingMessage, res: ServerResponse, remote: boolean) {
   const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
   const path = url.pathname;
   const method = req.method ?? "GET";
   /** scratch for route matches, shared by every `path.match` below */
   let m: RegExpMatchArray | null = null;
   try {
-    // loopback-host + loopback-origin gate before any route (DNS rebinding / CSRF)
-    if (!isLoopbackHost(req.headers.host)) {
-      return json(res, 403, { error: "forbidden: loopback host required" });
+    // DNS-rebinding / CSRF gate, before any route.
+    //
+    // Split by listener, because the two sockets have opposite threat
+    // models. The loopback server is reachable by any web page that can
+    // resolve a name to 127.0.0.1 and carries no credential of its own, so
+    // its defence has to be the Host header. The companion listener is
+    // reached by address or tailnet name — never loopback — so the same
+    // check would reject every phone; what protects it instead is the
+    // bearer token, which a rebinding page cannot obtain.
+    //
+    // The Origin rule is the stricter of the two on the companion side: a
+    // native app sends no Origin at all, so any request that carries one is
+    // a browser reaching a port that has no business serving browsers.
+    if (remote) {
+      if (req.headers.origin) {
+        return json(res, 403, { error: "forbidden: cross-origin request" });
+      }
+    } else {
+      if (!isLoopbackHost(req.headers.host)) {
+        return json(res, 403, { error: "forbidden: loopback host required" });
+      }
+      const origin = req.headers.origin;
+      if (origin && !isAllowedOrigin(origin)) {
+        return json(res, 403, { error: "forbidden: cross-origin request" });
+      }
     }
-    const origin = req.headers.origin;
-    if (origin && !isAllowedOrigin(origin)) {
-      return json(res, 403, { error: "forbidden: cross-origin request" });
+    if (remote) {
+      const denial = remoteDenial(req, path, method);
+      if (denial) return json(res, denial.status, { error: denial.error });
     }
+
+    // ── pairing: a code from the computer's screen becomes a device token ──
+    // Reachable on both listeners: the phone calls it over the network, and
+    // keeping it on loopback too is what lets the API smoke test exercise
+    // the real flow.
+    if (method === "POST" && path === "/api/pair") {
+      const body = await readBody(req);
+      const result = devices.redeem(String(body.code ?? ""), body.deviceName);
+      if ("error" in result) return json(res, 401, { error: result.error });
+      return json(res, 201, {
+        token: result.token,
+        device: result.device,
+        // so the phone can label the connection with something human
+        serverName: cfg.profile?.name?.trim() ? `${cfg.profile.name.trim()}'s computer` : "OpenMausBot",
+      });
+    }
+
     // ── internal peer-agent comms (localhost + shared token only) ──────
     // The agents-proxy (spawned inside a bot's agent process) calls these to
     // discover peers and hand a message to one. Not part of the public API.
@@ -1296,6 +1393,46 @@ const server = createServer(async (req, res) => {
         });
       }
       return json(res, 404, { error: "unknown internal endpoint" });
+    }
+
+    // ── companion: the phone that talks to this harness ─────────────────
+    // Loopback only (remoteDenial blocks these off-machine) — turning the
+    // companion on, pairing a phone, and revoking one are all decisions made
+    // at the computer.
+    if (method === "GET" && path === "/api/remote") {
+      return json(res, 200, remoteState());
+    }
+    let remoteMatch = path.match(/^\/api\/remote\/(enable|disable)$/);
+    if (remoteMatch && method === "POST") {
+      const on = remoteMatch[1] === "enable";
+      const state = on ? await remoteListener.enable() : await remoteListener.disable();
+      // Only remember a state we actually reached: persisting "enabled"
+      // after a failed bind would retry the same broken port every boot.
+      saveConfig({ remote: { enabled: state.enabled } });
+      Object.assign(cfg, loadConfig());
+      // turning it off ends the pairing window with it
+      if (!state.enabled) devices.closePairing();
+      const full = remoteState();
+      return json(res, state.error ? 409 : 200, full);
+    }
+    if (method === "POST" && path === "/api/remote/pairing") {
+      if (!remoteListener.running) {
+        return json(res, 409, { error: "turn the companion on before pairing a phone" });
+      }
+      devices.openPairing();
+      const full = remoteState();
+      return json(res, 201, full);
+    }
+    if (method === "DELETE" && path === "/api/remote/pairing") {
+      devices.closePairing();
+      const full = remoteState();
+      return json(res, 200, full);
+    }
+    remoteMatch = path.match(/^\/api\/devices\/([\w-]+)$/);
+    if (remoteMatch && method === "DELETE") {
+      if (!devices.revoke(remoteMatch[1])) return json(res, 404, { error: "no such device" });
+      const full = remoteState();
+      return json(res, 200, full);
     }
 
     // ── routines calendar ────────────────────────────────────────────────
@@ -2068,15 +2205,43 @@ const server = createServer(async (req, res) => {
     const status = (e as any)?.status ?? 500;
     return json(res, status, { error: e instanceof Error ? e.message : String(e) });
   }
-});
+}
 
-server.listen(PORT, "127.0.0.1", () => {
+// The trusted socket: the desktop window, the agents-proxy, and the tests.
+// Its behaviour is unchanged by any of the companion work above.
+const server = createServer((req, res) => void handle(req, res, false));
+// The companion socket: same handler, `remote` on, so every request is
+// authenticated and route-limited.
+const remoteListener = new RemoteListener((req, res) => void handle(req, res, true), REMOTE_PORT);
+
+/** The whole companion picture in one payload — listener, pairing window,
+ * paired devices. The code is shown because it is on the user's own screen;
+ * device tokens have no representation here at all. */
+function remoteState() {
+  const pairing = devices.pairing();
+  return {
+    ...remoteListener.state(),
+    pairing: pairing ? { code: pairing.code, expiresAt: pairing.expiresAt } : null,
+    devices: devices.list(),
+  };
+}
+
+server.listen(PORT, "127.0.0.1", async () => {
   console.log(`openmausbot server on http://127.0.0.1:${PORT}`);
+  if (cfg.remote?.enabled) {
+    const state = await remoteListener.enable();
+    console.log(
+      state.enabled
+        ? `companion listener on http://0.0.0.0:${REMOTE_PORT} (${state.addresses.join(", ") || "no LAN address"})`
+        : `companion listener did not start: ${state.error}`,
+    );
+  }
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     routines?.stop();
+    void remoteListener.disable().catch(() => {});
     void registry.disposeAll().finally(() => process.exit(0));
   });
 }

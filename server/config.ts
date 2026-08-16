@@ -23,6 +23,9 @@ export interface AppConfig {
   /** The person using the app (collected in onboarding, shown in the
    * sidebar). Not a secret — echoed back by GET /api/config. */
   profile?: { name?: string; email?: string };
+  /** The companion listener (paired phones). Off unless the user turned it
+   * on, and remembered across restarts so a paired phone keeps working. */
+  remote?: { enabled?: boolean };
   instances?: InstanceConfigMap;
 }
 
@@ -70,7 +73,7 @@ export function saveConfig(patch: Partial<AppConfig>): void {
   } catch {
     /* first write */
   }
-  for (const key of ["xai", "composio", "box", "opencodeGo", "tts", "profile"] as const) {
+  for (const key of ["xai", "composio", "box", "opencodeGo", "tts", "profile", "remote"] as const) {
     if (patch[key] && typeof patch[key] === "object") {
       disk[key] = { ...(disk[key] as object), ...patch[key] };
     }

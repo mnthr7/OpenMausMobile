@@ -17,6 +17,9 @@ const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SERVER_DIR, "..");
 const PORT = 18800 + Math.floor(Math.random() * 10_000);
 const BASE = `http://127.0.0.1:${PORT}`;
+// the companion listener, reached the way a phone would reach it
+const REMOTE_PORT = PORT + 1;
+const REMOTE_BASE = `http://127.0.0.1:${REMOTE_PORT}`;
 
 let child: ChildProcess;
 /** stands in for the box provider so config saving never touches the network */
@@ -74,6 +77,7 @@ beforeAll(async () => {
       HOME: home,
       USERPROFILE: home,
       OMB_PORT: String(PORT),
+      OMB_REMOTE_PORT: String(REMOTE_PORT),
       OMB_BOX_API: `http://127.0.0.1:${boxStubPort}`,
       OMB_STATIC_DIR: staticDir,
     },
@@ -614,5 +618,165 @@ describe("resumable event stream", () => {
         stream.close();
       }
     }
+  });
+});
+
+// The companion is the only part of this server that is reachable from off
+// the machine, so its tests are about what a phone CANNOT do at least as
+// much as what it can. Ordered: the listener has to be up before a phone
+// exists, and the last test takes it back down.
+describe("companion listener", () => {
+  /** a request as a phone makes it — over the network socket, with a token */
+  const remote = async (
+    method: string,
+    path: string,
+    opts: { token?: string; body?: unknown } = {},
+  ): Promise<{ status: number; body: any }> => {
+    const res = await fetch(`${REMOTE_BASE}${path}`, {
+      method,
+      headers: {
+        ...(opts.body ? { "content-type": "application/json" } : {}),
+        ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
+      },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  /** run the real pairing handshake and hand back the phone's token */
+  const pairPhone = async (name = "Test iPhone") => {
+    await api("POST", "/api/remote/pairing");
+    const { body: state } = await api("GET", "/api/remote");
+    const paired = await remote("POST", "/api/pair", { body: { code: state.pairing.code, deviceName: name } });
+    expect(paired.status).toBe(201);
+    return paired.body.token as string;
+  };
+
+  it("is off until asked, and refuses to pair while off", async () => {
+    const { status, body } = await api("GET", "/api/remote");
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ enabled: false, devices: [], pairing: null });
+    await expect(fetch(REMOTE_BASE)).rejects.toThrow();
+
+    const early = await api("POST", "/api/remote/pairing");
+    expect(early.status).toBe(409);
+  });
+
+  it("comes up on request and answers the network", async () => {
+    const { status, body } = await api("POST", "/api/remote/enable");
+    expect(status).toBe(200);
+    expect(body.enabled).toBe(true);
+    expect(body.port).toBe(REMOTE_PORT);
+
+    // reachable, but nothing is authorized yet
+    const cold = await remote("GET", "/api/bots");
+    expect(cold.status).toBe(401);
+    expect(cold.body.error).toContain("pair");
+  });
+
+  it("pairs a phone with a code and issues a token exactly once", async () => {
+    const opened = await api("POST", "/api/remote/pairing");
+    expect(opened.status).toBe(201);
+    expect(opened.body.pairing.code).toMatch(/^\d{6}$/);
+    const code = opened.body.pairing.code;
+
+    const wrong = await remote("POST", "/api/pair", { body: { code: "000000", deviceName: "Impostor" } });
+    expect(wrong.status).toBe(401);
+
+    const paired = await remote("POST", "/api/pair", { body: { code, deviceName: "Milind's iPhone" } });
+    expect(paired.status).toBe(201);
+    expect(paired.body.token).toMatch(/^omb_/);
+    expect(paired.body.device.name).toBe("Milind's iPhone");
+
+    // the code is spent, and the token is never readable again
+    const replay = await remote("POST", "/api/pair", { body: { code, deviceName: "Second" } });
+    expect(replay.status).toBe(401);
+
+    const state = await api("GET", "/api/remote");
+    expect(state.body.pairing).toBeNull();
+    expect(state.body.devices.some((d: { name: string }) => d.name === "Milind's iPhone")).toBe(true);
+    expect(JSON.stringify(state.body)).not.toContain(paired.body.token);
+
+    // and it works: the phone can read the fleet
+    const bots = await remote("GET", "/api/bots", { token: paired.body.token });
+    expect(bots.status).toBe(200);
+    expect(bots.body.bots.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("refuses a paired phone the things that belong to the computer", async () => {
+    const token = await pairPhone("Locked-down phone");
+
+    // credentials
+    const config = await remote("PUT", "/api/config", { token, body: { box: { token: "box_good" } } });
+    expect(config.status).toBe(403);
+    // ...but reading the configured-or-not booleans is fine
+    expect((await remote("GET", "/api/config", { token })).status).toBe(200);
+
+    // companion management — a lost phone must not be able to pair another
+    expect((await remote("GET", "/api/remote", { token })).status).toBe(403);
+    expect((await remote("POST", "/api/remote/pairing", { token })).status).toBe(403);
+    expect((await remote("POST", "/api/remote/disable", { token })).status).toBe(403);
+    expect((await remote("DELETE", "/api/devices/anything", { token })).status).toBe(403);
+
+    // host operations
+    expect((await remote("POST", "/api/local-computer/pull", { token, body: {} })).status).toBe(403);
+
+    // the peer-agent comms surface does not exist off-machine
+    const internal = await remote("GET", "/api/internal/agents", { token });
+    expect(internal.status).toBe(404);
+
+    // nor does the packaged UI
+    const ui = await fetch(REMOTE_BASE, { headers: { authorization: `Bearer ${token}` } });
+    expect(ui.status).toBe(404);
+    // ...while the desktop window still gets it on loopback
+    expect((await fetch(`${BASE}/`)).status).toBe(200);
+  });
+
+  it("lets a paired phone answer a bot, which is the whole point", async () => {
+    const token = await pairPhone("Working phone");
+    const { body } = await api("GET", "/api/bots");
+    const bot = body.bots[0];
+
+    // sending is allowed (this fleet's only engine is a shadow, so the
+    // provider refusal — not an auth refusal — is what proves the route ran)
+    const send = await remote("POST", `/api/bots/${bot.id}/messages`, { token, body: { text: "from my phone" } });
+    expect(send.status).toBe(409);
+    expect(send.body.error).toContain("unavailable");
+
+    // and so is answering an approval card by thread
+    const respond = await remote("POST", `/api/threads/${bot.threadId}/respond`, {
+      token,
+      body: { requestId: "nope", behavior: "allow" },
+    });
+    expect(respond.status).not.toBe(401);
+    expect(respond.status).not.toBe(403);
+  });
+
+  it("revokes a device immediately", async () => {
+    const token = await pairPhone("Doomed phone");
+    expect((await remote("GET", "/api/bots", { token })).status).toBe(200);
+
+    const { body: state } = await api("GET", "/api/remote");
+    const device = state.devices.find((d: { name: string }) => d.name === "Doomed phone");
+    const revoked = await api("DELETE", `/api/devices/${device.id}`);
+    expect(revoked.status).toBe(200);
+    expect(revoked.body.devices.some((d: { id: string }) => d.id === device.id)).toBe(false);
+
+    expect((await remote("GET", "/api/bots", { token })).status).toBe(401);
+    expect((await api("DELETE", `/api/devices/${device.id}`)).status).toBe(404);
+  });
+
+  it("goes back down on request, dropping the socket", async () => {
+    const token = await pairPhone("Last phone");
+    const { status, body } = await api("POST", "/api/remote/disable");
+    expect(status).toBe(200);
+    expect(body.enabled).toBe(false);
+    expect(body.addresses).toEqual([]);
+    // still paired — off is not the same as revoked
+    expect(body.devices.some((d: { name: string }) => d.name === "Last phone")).toBe(true);
+
+    await expect(fetch(`${REMOTE_BASE}/api/bots`, { headers: { authorization: `Bearer ${token}` } })).rejects.toThrow();
+    // the loopback API is untouched throughout
+    expect((await api("GET", "/api/health")).status).toBe(200);
   });
 });
