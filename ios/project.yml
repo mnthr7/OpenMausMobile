@@ -41,7 +41,10 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: OpenMausBot
+        # What appears under the icon. Distinct from the desktop app on
+        # purpose: someone may well have both, and two identical labels on
+        # one person's devices is a small cruelty.
+        CFBundleDisplayName: OpenMausMobile
         # REQUIRED, and easy to lose. Without a launch screen iOS runs the
         # app in compatibility scaling: letterboxed inside black bars, with
         # everything drawn oversized, on every modern iPhone. An empty
