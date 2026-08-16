@@ -31,7 +31,7 @@ import {
   MdnsResponder,
   type ServiceInfo,
 } from "./mdns.ts";
-import { RemoteListener } from "./remote.ts";
+import { refreshTailnetName, RemoteListener } from "./remote.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
@@ -1205,8 +1205,14 @@ function companionService(): ServiceInfo {
  * 5353 taken by another responder, no multicast on this network) is not an
  * error the user has to fix — pairing by typed address still works. */
 async function syncDiscovery(): Promise<void> {
-  if (remoteListener.running) await mdns.advertise(companionService());
-  else await mdns.stop();
+  if (remoteListener.running) {
+    // the tailnet name is what a phone can reach from outside this network,
+    // and asking for it is a subprocess — do it once, here
+    await refreshTailnetName().catch(() => {});
+    await mdns.advertise(companionService());
+  } else {
+    await mdns.stop();
+  }
 }
 
 /** What a request arriving on the companion listener is allowed to do.

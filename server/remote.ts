@@ -10,6 +10,7 @@
 // when a 0.0.0.0 listener is reached over loopback. Separate sockets make
 // the distinction structural instead of a guess, so the trusted path stays
 // exactly as trusted as it was before this file existed.
+import { execFile } from "node:child_process";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { networkInterfaces } from "node:os";
 
@@ -27,10 +28,80 @@ export function lanAddresses(): string[] {
   return out;
 }
 
+/** Tailscale hands its nodes an address in 100.64.0.0/10 — the CGNAT range
+ * RFC 6598 set aside, which is why it never collides with a home network.
+ *
+ * Worth telling apart from a LAN address because it behaves completely
+ * differently: it does not change when you join another wifi, it works from
+ * anywhere the tailnet reaches, and it survives the guest network that
+ * isolates its clients. For a companion it is the *better* address, and the
+ * only one that keeps working when you leave the house. */
+export function tailscaleAddress(addresses: string[] = lanAddresses()): string | null {
+  for (const address of addresses) {
+    const [first, second] = address.split(".").map(Number);
+    if (first === 100 && second >= 64 && second <= 127) return address;
+  }
+  return null;
+}
+
+/** The machine's MagicDNS name, e.g. `macbook.tail1234.ts.net`.
+ *
+ * Worth having as well as the address, because a phone reaching a tailnet
+ * over plain HTTP is on the wrong side of App Transport Security: iOS
+ * exempts local networking, and 100.64/10 is CGNAT shared space rather than
+ * one of the private ranges that exemption covers. A `ts.net` hostname can
+ * be exempted by name, which an address cannot.
+ *
+ * Read once when the listener comes up and cached — asking Tailscale is a
+ * subprocess, and nothing here is worth spawning one per request. */
+let cachedTailnetName: string | null = null;
+
+export function tailnetName(): string | null {
+  return cachedTailnetName;
+}
+
+/** Ask the Tailscale CLI where it thinks we are. Silent on every failure:
+ * not installed, not logged in, not running — all just mean "no name", and
+ * the address still works. */
+export async function refreshTailnetName(): Promise<void> {
+  // Absolute paths first, PATH last: an app launched from Finder inherits a
+  // minimal PATH that usually does not include Homebrew, so relying on the
+  // lookup alone would work in dev and fail in the packaged build.
+  const candidates = [
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "tailscale",
+  ];
+  for (const cli of candidates) {
+    const name = await new Promise<string | null>((resolve) => {
+      execFile(cli, ["status", "--json"], { timeout: 5000 }, (error, stdout) => {
+        if (error) return resolve(null);
+        try {
+          const dns = JSON.parse(stdout)?.Self?.DNSName;
+          // MagicDNS names are fully qualified, trailing dot and all
+          resolve(typeof dns === "string" && dns ? dns.replace(/\.$/, "") : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    if (name) {
+      cachedTailnetName = name;
+      return;
+    }
+  }
+  cachedTailnetName = null;
+}
+
 export interface RemoteState {
   enabled: boolean;
   port: number;
   addresses: string[];
+  /** The tailnet address, when this machine is on one. */
+  tailscale?: string;
+  /** Its MagicDNS name, when Tailscale will tell us. */
+  tailnetName?: string;
   /** Why the listener is not up despite being enabled (e.g. port in use). */
   error?: string;
 }
@@ -54,10 +125,15 @@ export class RemoteListener {
   }
 
   state(): RemoteState {
+    const addresses = this.running ? lanAddresses() : [];
+    const tailscale = tailscaleAddress(addresses);
+    const name = tailnetName();
     return {
       enabled: this.running,
       port: this.port,
-      addresses: this.running ? lanAddresses() : [],
+      addresses,
+      ...(tailscale ? { tailscale } : {}),
+      ...(tailscale && name ? { tailnetName: name } : {}),
       ...(this.lastError ? { error: this.lastError } : {}),
     };
   }

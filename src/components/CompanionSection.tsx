@@ -23,6 +23,14 @@ interface RemoteState {
   error?: string;
   pairing: { code: string; expiresAt: number } | null;
   devices: Device[];
+  /** Present when this machine is on a tailnet — the address that keeps
+   * working off this network. */
+  tailscale?: string;
+  /** Its MagicDNS name. Preferred over the address for anything the user
+   * types into the phone: iOS refuses plain HTTP to a bare tailnet address
+   * (100.64/10 is not one of the ranges its local-networking exemption
+   * covers) and the app exempts `ts.net` by name instead. */
+  tailnetName?: string;
   /** Bonjour: when advertising, the phone finds this computer by name. */
   discovery: { advertising: boolean; name: string; type: string };
 }
@@ -92,7 +100,16 @@ export function CompanionSection() {
   }
 
   const secondsLeft = state.pairing ? Math.max(0, Math.round((state.pairing.expiresAt - now) / 1000)) : 0;
-  const address = state.addresses[0];
+  // Prefer the tailnet when there is one: it survives changing wifi, works
+  // away from home, and gets through a guest network that isolates its
+  // clients — which is the case where the LAN address looks perfectly
+  // correct and reaches nothing.
+  //
+  // The name beats the address when Tailscale will give us one, because the
+  // phone can only use the name: iOS blocks plain HTTP to 100.64/10.
+  const tailnet = state.tailnetName ?? state.tailscale;
+  const address = tailnet ?? state.addresses[0];
+  const lan = state.addresses.find((candidate) => candidate !== state.tailscale);
 
   return (
     <div className="flex flex-col gap-4">
@@ -108,15 +125,17 @@ export function CompanionSection() {
                 ? "The harness stays on 127.0.0.1 only."
                 : !address
                   ? `Listening on port ${state.port} — no network address yet.`
-                  : state.discovery?.advertising
-                    ? // The address is shown even when Bonjour is working.
-                      // Discovery can be advertising happily and still not
-                      // reach the phone — a guest network that isolates its
-                      // clients blocks multicast — and when that happens the
-                      // typed address is the way out. Hiding it behind a
-                      // failure the panel cannot detect is no help at all.
-                      `Your phone will find this computer as "${state.discovery.name}", or you can enter ${address}:${state.port}.`
-                    : `Listening on ${address}:${state.port} — enter that on your phone.`}
+                  : tailnet
+                    ? `Enter ${tailnet}:${state.port} on your phone — that works from anywhere on your tailnet, on any network.`
+                    : state.discovery?.advertising
+                      ? // The address is shown even when Bonjour is working.
+                        // Discovery can be advertising happily and still not
+                        // reach the phone — a guest network that isolates its
+                        // clients blocks multicast — and when that happens the
+                        // typed address is the way out. Hiding it behind a
+                        // failure the panel cannot detect is no help at all.
+                        `Your phone will find this computer as "${state.discovery.name}", or you can enter ${address}:${state.port}.`
+                      : `Listening on ${address}:${state.port} — enter that on your phone.`}
             </div>
           </div>
           <button
@@ -130,6 +149,27 @@ export function CompanionSection() {
             <span className={cnKnob(state.enabled)} />
           </button>
         </div>
+        {state.enabled && tailnet && lan && (
+          <div className="mt-3 text-[13px] text-ink-secondary">
+            On this network only: {lan}:{state.port}
+          </div>
+        )}
+        {/* A tailnet address with no name is workable on a laptop and not on
+            a phone, so say so rather than letting the pairing fail with an
+            unexplained policy error. */}
+        {state.enabled && state.tailscale && !state.tailnetName && (
+          <div className="mt-3 text-[13px] text-ink-secondary">
+            Turn on MagicDNS in your Tailscale admin console to get a name for this
+            computer — iPhones can't connect to a bare tailnet address.
+          </div>
+        )}
+        {state.enabled && !state.tailscale && (
+          <div className="mt-3 text-[13px] text-ink-secondary">
+            Only reachable on this network. Install Tailscale on both this computer and your
+            phone to reach it from anywhere — including networks that stop devices from seeing
+            each other.
+          </div>
+        )}
         {(error || state.error) && (
           <div className="mt-3 text-[13px] text-danger">{error ?? state.error}</div>
         )}

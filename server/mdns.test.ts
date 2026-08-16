@@ -5,6 +5,7 @@
 import { createSocket } from "node:dgram";
 import { describe, expect, it } from "vitest";
 
+import { tailscaleAddress } from "./remote.ts";
 import {
   advertisableAddresses,
   announcement,
@@ -335,5 +336,25 @@ describe("MdnsResponder", () => {
     await responder.stop();
     expect(responder.advertising).toBe(false);
     expect(responder.address()).toBeNull();
+  });
+});
+
+// Tailscale hands out 100.64.0.0/10 (RFC 6598 shared address space), which
+// is what makes a tailnet address distinguishable from a LAN one — and
+// worth distinguishing, because it is the address that still works when the
+// phone is on a different network entirely.
+describe("tailscaleAddress", () => {
+  it("picks the CGNAT address out of a mixed list", () => {
+    expect(tailscaleAddress(["192.168.1.42", "100.102.178.88"])).toBe("100.102.178.88");
+    expect(tailscaleAddress(["100.64.0.1"])).toBe("100.64.0.1");
+    expect(tailscaleAddress(["100.127.255.254"])).toBe("100.127.255.254");
+  });
+
+  it("does not mistake a neighbouring 100.x for a tailnet", () => {
+    // 100.0.0.0/10 and 100.128.0.0/9 are ordinary public space
+    expect(tailscaleAddress(["100.63.255.255"])).toBeNull();
+    expect(tailscaleAddress(["100.128.0.1"])).toBeNull();
+    expect(tailscaleAddress(["10.0.0.5", "192.168.1.1", "172.16.0.1"])).toBeNull();
+    expect(tailscaleAddress([])).toBeNull();
   });
 });
