@@ -45,11 +45,13 @@ ios/
     SSE.swift                    line parser + URLSession event stream
     Client.swift                 every call the phone is allowed to make
     Store.swift                  the fold: frames → state
+    Dictation.swift              composer text + transcript join
   Tests/CompanionCoreTests/
     Fixtures/                    captured from a real server — do not hand-edit
     DecodingTests.swift          the contract with the harness
     SSETests.swift               the parser, which is where this goes wrong
     StoreTests.swift             the fold
+    DictationTests.swift         partials replace, they do not stack
   App/                           SwiftUI, and everything that needs a device
     CompanionApp.swift           entry; owns when the stream lives and dies
     Session.swift                connection, lifecycle, actions
@@ -59,6 +61,7 @@ ios/
     PairingView.swift            find a computer, type the six digits
     ChatListView.swift           roster, with "waiting on you" pulled to the top
     ChatView.swift               transcript, approval cards, composer
+    SpeechDictation.swift        SFSpeechRecognizer, press-to-stop
     SettingsView.swift           status, and unpair
 ```
 
@@ -147,13 +150,13 @@ mean losing the ability to lock it out.
   `.ignored` for the shifted case hands the keypress back to the text field,
   which is the only thing that can insert the newline once Return is claimed.
   Software keyboards have no Shift+Return, so there `.onSubmit` sends.
-- **No affordance without a feature behind it.** The reference design this was
-  modelled on has a composer mic and a "+" for new chats; there is no dictation
-  here and creating bots belongs on the computer, so neither is drawn. Search
-  is real and filters the roster.
+- **Composer dictation is the mic.** Tap to talk, tap to stop, then send or
+  edit — the same press-to-stop shape as the desktop composer, on-device
+  `SFSpeechRecognizer` when the phone supports it. The mic stays next to
+  send so you can add another sentence by voice, and so you can stop
+  without an Escape key. Search is real and filters the roster.
 
 ## Not in this version
 
-Foreground only, same network only. No push (the app must be open to hear
-anything), no Tailscale guidance yet, no token-by-token streaming, no computer
-panel, no voice. Those are phase 4 in the architecture doc.
+Foreground only. No push (the app must be open to hear anything). Call mode
+and spoken replies are still later; composer dictation is in.
