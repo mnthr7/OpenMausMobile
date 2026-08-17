@@ -115,7 +115,14 @@ posixOnly("conversation branching e2e (fake ACP fleet)", () => {
     await new Promise<void>((resolve) => {
       if (!child || child.exitCode !== null) return resolve();
       child.on("close", () => resolve());
-      setTimeout(() => (child.kill("SIGKILL"), resolve()), 5_000).unref?.();
+      // SIGKILL, then keep waiting for `close`. Resolving in the same tick
+      // as the signal starts deleting the home directory out from under a
+      // process that has not died yet, and the delete is what fails —
+      // EACCES on rmSync below. A laptop wins that race every time, so it
+      // only ever shows up on a loaded CI runner.
+      setTimeout(() => child.kill("SIGKILL"), 5_000).unref?.();
+      // a floor, so a process that survives SIGKILL cannot hang the suite
+      setTimeout(resolve, 10_000).unref?.();
     });
     rmSync(home, { recursive: true, force: true });
   });
