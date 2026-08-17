@@ -120,7 +120,15 @@ afterAll(async () => {
   await new Promise<void>((resolve) => {
     if (!harness || harness.exitCode !== null) return resolve();
     harness.on("close", () => resolve());
-    setTimeout(() => (harness.kill("SIGKILL"), resolve()), 5_000).unref?.();
+    // SIGKILL, then keep waiting for `close`. Resolving in the same tick as
+    // the signal — which is what this did — starts deleting the home
+    // directory out from under a process that has not died yet, and the
+    // delete is what fails. A loaded CI runner loses that race; a laptop
+    // wins it every time, which is why it reads as a phantom.
+    setTimeout(() => harness.kill("SIGKILL"), 5_000).unref?.();
+    // and a floor, so a process that somehow survives SIGKILL cannot hang
+    // the suite instead
+    setTimeout(resolve, 10_000).unref?.();
   });
   rmSync(home, { recursive: true, force: true });
 });
