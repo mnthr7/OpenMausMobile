@@ -556,6 +556,13 @@ describe("PUT /api/push", () => {
     expect((await device("PUT", "/api/push", { body: { token: "not-hex!" } })).status).toBe(400);
     expect((await device("PUT", "/api/push", { body: { token: "ab".repeat(101) } })).status).toBe(400);
   });
+
+  // The relay floor-rejects any token under 16 hex chars for the whole batch
+  // it's registered in (see relay/src/server.mjs). Reject short tokens here
+  // too so a bad registration never reaches the relay in the first place.
+  it("refuses a token shorter than the relay's 16-char floor", async () => {
+    expect((await device("PUT", "/api/push", { body: { token: "ab" } })).status).toBe(400);
+  });
 });
 
 // The whole loop, with the real registry rather than a stub: open a pairing

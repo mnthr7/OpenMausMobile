@@ -175,7 +175,7 @@ export function createProxyHandler(options: ProxyOptions) {
           const token = (body as { token?: unknown }).token ?? null;
           if (
             token !== null &&
-            (typeof token !== "string" || token.length > 200 || !/^[0-9a-f]+$/i.test(token))
+            (typeof token !== "string" || !/^[0-9a-f]{16,200}$/i.test(token))
           ) {
             return sendJson(res, 400, { error: "bad push token" });
           }
