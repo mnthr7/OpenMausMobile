@@ -48,6 +48,8 @@ beforeAll(async () => {
     createProxyHandler({
       harnessPort,
       authenticate: (t) => t === TOKEN,
+      identify: (t) => (t === TOKEN ? "d1" : null),
+      setPushToken: () => true,
       redeem: () => ({ error: "not used here" }),
       serverName: () => "Test computer",
     }),

@@ -35,11 +35,13 @@ describe("what the app may do", () => {
     ["PATCH", "/api/bots/bot_123"],
     ["POST", "/api/bots/bot_123/messages"],
     ["POST", "/api/bots/bot_123/interrupt"],
+    ["POST", "/api/groups"],
     ["PATCH", "/api/groups/room-1"],
     ["POST", "/api/groups/room-1/messages"],
     ["GET", "/api/threads/th_1/messages"],
     ["GET", "/api/threads/th_1/messages/msg_2/image"],
     ["POST", "/api/threads/th_1/respond"],
+    ["PUT", "/api/push"],
   ];
 
   for (const [method, path] of calls) {
@@ -85,6 +87,8 @@ describe("what it may not", () => {
     expect(allowed("DELETE", "/api/bots/bot_123")).toBe(false);
     expect(allowed("POST", "/api/threads/th_1/messages")).toBe(false);
     expect(allowed("GET", "/api/groups/room-1")).toBe(false);
+    expect(allowed("GET", "/api/push")).toBe(false);
+    expect(allowed("POST", "/api/push")).toBe(false);
   });
 
   // Patterns are anchored, so a path that merely starts right is still a

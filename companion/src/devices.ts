@@ -23,10 +23,16 @@ export interface DeviceRecord {
   tokenHash: string;
   createdAt: number;
   lastSeenAt: number;
+  /** This device's current APNs token, if it has registered one. Like the
+   * bearer token this is secret-shaped, but unlike it there is no digest to
+   * keep instead: a relay has to hand the raw value to APNs to push at all,
+   * so it is stored in the clear and simply kept off every response the UI
+   * can read (see `PublicDevice`). */
+  pushToken?: string;
 }
 
-/** What the UI is allowed to see: a device without its secret. */
-export type PublicDevice = Omit<DeviceRecord, "tokenHash">;
+/** What the UI is allowed to see: a device without its secrets. */
+export type PublicDevice = Omit<DeviceRecord, "tokenHash" | "pushToken">;
 
 /** A pairing window: one short-lived code, deliberately single-use.
  *
@@ -92,13 +98,19 @@ const timestamp = (value: unknown, fallback: number): number =>
  * from since pairing was last seen when it paired. */
 function normalizeDevice(record: Partial<DeviceRecord> & { id: string; tokenHash: string }): DeviceRecord {
   const createdAt = timestamp(record.createdAt, Date.now());
-  return {
+  const device: DeviceRecord = {
     id: record.id,
     tokenHash: record.tokenHash,
     name: cleanDeviceName(record.name),
     createdAt,
     lastSeenAt: timestamp(record.lastSeenAt, createdAt),
   };
+  // Same reasoning as the bounded body read in the proxy: a hand-edited or
+  // stale-build file gets to skip a field, not smuggle an oversized one in.
+  if (typeof record.pushToken === "string" && record.pushToken.length <= 200) {
+    device.pushToken = record.pushToken;
+  }
+  return device;
 }
 
 /** The paired fleet: who may reach the harness through the sidecar, and the
@@ -143,7 +155,7 @@ export class DeviceRegistry {
 
   /** Every paired device, without the hash — this is what the page renders. */
   list(): PublicDevice[] {
-    return this.devices.map(({ tokenHash, ...rest }) => rest);
+    return this.devices.map(({ tokenHash, pushToken, ...rest }) => rest);
   }
 
   /** How many phones are paired, against MAX_DEVICES. */
@@ -244,6 +256,36 @@ export class DeviceRegistry {
       }
     }
     return device;
+  }
+
+  /** The device this bearer token belongs to, or null — an id rather than the
+   * full record, for callers that only need to know which device is talking
+   * (the push-token route below is the first one). This is `authenticate`
+   * under the hood, so it touches `lastSeenAt` under the exact same
+   * throttle — one caller resolving a token is not a reason for two writes. */
+  identify(token: string | undefined): string | null {
+    return this.authenticate(token)?.id ?? null;
+  }
+
+  /** Save or clear this device's APNs push token. `null` clears it — a phone
+   * that turns notifications off should stop being pushed to, not keep a
+   * stale token nothing will ever use again. False when there is no such
+   * device, so a caller with a stale id sees that rather than a silent
+   * no-op. */
+  setPushToken(id: string, pushToken: string | null): boolean {
+    const device = this.devices.find((d) => d.id === id);
+    if (!device) return false;
+    if (pushToken === null) delete device.pushToken;
+    else device.pushToken = pushToken;
+    this.persist();
+    return true;
+  }
+
+  /** Every push token currently on file, deduplicated. What a relay fans a
+   * notification out to — one entry per token, not per device, so two
+   * phones that somehow share one (a restore, a reinstall) are pushed once. */
+  pushTokens(): string[] {
+    return [...new Set(this.devices.map((d) => d.pushToken).filter((t): t is string => Boolean(t)))];
   }
 
   /** Take a phone's access away. False when there was no such device — a

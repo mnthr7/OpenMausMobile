@@ -40,6 +40,8 @@ const stand = async (harness: Server): Promise<string> => {
     createProxyHandler({
       harnessPort,
       authenticate: () => true,
+      identify: () => "d1",
+      setPushToken: () => true,
       redeem: () => ({ error: "not in this test" }),
       serverName: () => "Ada's computer",
     }),
@@ -143,6 +145,8 @@ describe("an upstream that fails mid-stream", () => {
       createProxyHandler({
         harnessPort,
         authenticate: () => true,
+        identify: () => "d1",
+        setPushToken: () => true,
         redeem: () => ({ error: "not in this test" }),
         serverName: () => "Ada's computer",
       }),

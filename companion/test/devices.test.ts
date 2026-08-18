@@ -173,6 +173,61 @@ describe("DeviceRegistry", () => {
     writeFileSync(join(DATA_DIR, "devices.json"), "{ not json");
     expect(new DeviceRegistry().count()).toBe(0);
   });
+
+  it("identify returns the device id for a valid token and null otherwise", () => {
+    const registry = new DeviceRegistry();
+    const { token, device } = pair(registry);
+
+    expect(registry.identify(token)).toBe(device.id);
+    expect(registry.identify("omb_wrong")).toBeNull();
+    expect(registry.identify(undefined)).toBeNull();
+  });
+
+  it("setPushToken persists across reload and pushTokens lists it", () => {
+    const registry = new DeviceRegistry();
+    const { device } = pair(registry);
+
+    expect(registry.setPushToken(device.id, "ab".repeat(32))).toBe(true);
+    expect(new DeviceRegistry().pushTokens()).toEqual(["ab".repeat(32)]);
+
+    expect(registry.setPushToken(device.id, null)).toBe(true);
+    expect(registry.pushTokens()).toEqual([]);
+
+    expect(registry.setPushToken("no-such-id", "cd".repeat(32))).toBe(false);
+  });
+
+  it("pushTokens dedupes across devices and skips ones with none", () => {
+    const registry = new DeviceRegistry();
+    const phone = pair(registry, "iPhone");
+    const tablet = pair(registry, "iPad");
+
+    expect(registry.pushTokens()).toEqual([]);
+    registry.setPushToken(phone.device.id, "ab".repeat(32));
+    registry.setPushToken(tablet.device.id, "ab".repeat(32));
+    expect(registry.pushTokens()).toEqual(["ab".repeat(32)]);
+  });
+
+  it("keeps the push token out of what list() renders", () => {
+    const registry = new DeviceRegistry();
+    const { device } = pair(registry);
+    registry.setPushToken(device.id, "ab".repeat(32));
+    expect(registry.list()[0]).not.toHaveProperty("pushToken");
+  });
+
+  // Same treatment as name/lastSeenAt/createdAt above: a hand-edited or
+  // stale-build record must not let an oversized or non-string field in.
+  it("drops an oversized or non-string pushToken read back from disk", () => {
+    const registry = new DeviceRegistry();
+    const { device } = pair(registry);
+    registry.setPushToken(device.id, "ab".repeat(32));
+
+    const file = join(DATA_DIR, "devices.json");
+    const stored = JSON.parse(readFileSync(file, "utf8"));
+    stored.devices[0].pushToken = "x".repeat(201);
+    writeFileSync(file, JSON.stringify(stored));
+
+    expect(new DeviceRegistry().pushTokens()).toEqual([]);
+  });
 });
 
 describe("authenticate under a failing disk", () => {

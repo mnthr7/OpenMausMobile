@@ -119,6 +119,8 @@ const companion = createServer(
     // `authenticate` also stamps lastSeenAt, which is what makes the control
     // page able to say when a phone was last heard from.
     authenticate: (token) => Boolean(devices.authenticate(token)),
+    identify: (token) => devices.identify(token),
+    setPushToken: (id, token) => devices.setPushToken(id, token),
     redeem: (code, deviceName) => devices.redeem(code, deviceName),
     serverName: machineName,
   }),

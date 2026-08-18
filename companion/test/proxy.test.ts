@@ -72,6 +72,10 @@ let harness: ChildProcess;
 let sidecar: Server;
 let home: string;
 let stderr = "";
+/** What the fake registry's `setPushToken` was last called with — these
+ * tests fake the registry the same way `authenticate` already does below, so
+ * assertions read off this rather than a real `DeviceRegistry`. */
+let lastPushToken: { id: string; token: string | null } | undefined;
 
 /** a request as a device makes it: a token, and a Host that is not loopback */
 const device = async (
@@ -168,6 +172,11 @@ beforeAll(async () => {
     createProxyHandler({
       harnessPort: HARNESS_PORT,
       authenticate: (t) => t === TOKEN,
+      identify: (t) => (t === TOKEN ? "d1" : null),
+      setPushToken: (id, token) => {
+        lastPushToken = { id, token };
+        return true;
+      },
       redeem: (code, deviceName) =>
         code === "424242"
           ? { token: TOKEN, device: { id: "d1", name: String(deviceName) } }
@@ -349,6 +358,8 @@ describe("the sidecar in front of an unmodified harness", () => {
       createProxyHandler({
         harnessPort: 1,
         authenticate: () => true,
+        identify: () => "d1",
+        setPushToken: () => true,
         redeem: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
@@ -381,6 +392,8 @@ describe("the sidecar in front of an unmodified harness", () => {
       createProxyHandler({
         harnessPort: mutePort,
         authenticate: () => true,
+        identify: () => "d1",
+        setPushToken: () => true,
         redeem: () => ({ error: "no" }),
         serverName: () => "Test computer",
         // the shipped value is 30s; the behaviour under test is the same one
@@ -432,6 +445,8 @@ describe("the sidecar in front of an unmodified harness", () => {
       createProxyHandler({
         harnessPort: slowPort,
         authenticate: () => true,
+        identify: () => "d1",
+        setPushToken: () => true,
         redeem: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
@@ -491,6 +506,8 @@ describe("the sidecar in front of an unmodified harness", () => {
       createProxyHandler({
         harnessPort: floodPort,
         authenticate: () => true,
+        identify: () => "d1",
+        setPushToken: () => true,
         redeem: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
@@ -514,6 +531,33 @@ describe("the sidecar in front of an unmodified harness", () => {
   }, 20_000);
 });
 
+describe("PUT /api/push", () => {
+  it("stores the caller's push token locally, without touching the harness", async () => {
+    const res = await device("PUT", "/api/push", { body: { token: "ab".repeat(32) } });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(lastPushToken).toEqual({ id: "d1", token: "ab".repeat(32) });
+  });
+
+  it("clears the token when the body carries null", async () => {
+    const res = await device("PUT", "/api/push", { body: { token: null } });
+    expect(res.status).toBe(200);
+    expect(lastPushToken).toEqual({ id: "d1", token: null });
+  });
+
+  // Checked before the body is even read: an unpaired caller gets nothing
+  // read from the socket, the same posture as every other route here.
+  it("without a valid bearer is 401", async () => {
+    const res = await device("PUT", "/api/push", { token: null, body: { token: "ab".repeat(32) } });
+    expect(res.status).toBe(401);
+  });
+
+  it("refuses a token that is not lowercase hex, or too long", async () => {
+    expect((await device("PUT", "/api/push", { body: { token: "not-hex!" } })).status).toBe(400);
+    expect((await device("PUT", "/api/push", { body: { token: "ab".repeat(101) } })).status).toBe(400);
+  });
+});
+
 // The whole loop, with the real registry rather than a stub: open a pairing
 // window on the control surface, redeem the code the way the phone does, and
 // use the token that comes back. This is the path that has no unit-test
@@ -528,6 +572,8 @@ describe("pairing, end to end", () => {
       createProxyHandler({
         harnessPort: HARNESS_PORT,
         authenticate: (t) => Boolean(registry.authenticate(t ?? undefined)),
+        identify: (t) => registry.identify(t ?? undefined),
+        setPushToken: (id, token) => registry.setPushToken(id, token),
         redeem: (code, deviceName) => registry.redeem(code, deviceName),
         serverName: () => "Ada's computer",
       }),
@@ -581,6 +627,17 @@ describe("pairing, end to end", () => {
       const bots = await fetch(`${base}/api/bots`, { headers: { authorization: `Bearer ${body.token}` } });
       expect(bots.status).toBe(200);
       expect(await bots.text()).not.toContain("resumeCursors");
+
+      // and it can register a push token — answered by the sidecar itself,
+      // never forwarded, so this works with no harness route for it at all
+      const pushed = await fetch(`${base}/api/push`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ token: "ab".repeat(32) }),
+      });
+      expect(pushed.status).toBe(200);
+      expect(await pushed.json()).toEqual({ ok: true });
+      expect(registry.pushTokens()).toEqual(["ab".repeat(32)]);
 
       // the computer can see the phone, and take it away again
       // SAFETY: /state's shape is this sidecar's own API, asserted by the

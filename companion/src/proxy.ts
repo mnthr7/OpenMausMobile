@@ -23,6 +23,12 @@ export interface ProxyOptions {
   harnessPort: number;
   /** Does this bearer token belong to a paired device? */
   authenticate: (token: string | undefined) => boolean;
+  /** The device this bearer token belongs to, or null. Used by routes that
+   * act on a specific device rather than just checking the fleet — the
+   * push-token route below is the one that needs it. */
+  identify: (token: string | undefined) => string | null;
+  /** Save or clear a device's APNs push token. */
+  setPushToken: (id: string, token: string | null) => boolean;
   /** Redeem a pairing code. Handled here and never forwarded: the harness
    * has no such route and no idea devices exist — pairing is the sidecar's
    * own concern, and the one thing a device does before it has a token. */
@@ -150,6 +156,31 @@ export function createProxyHandler(options: ProxyOptions) {
           const result = options.redeem(String(body.code ?? ""), body.deviceName);
           if ("error" in result) return sendJson(res, 401, { error: result.error });
           return sendJson(res, 201, { ...result, serverName: options.serverName() });
+        },
+        (error: Error) => sendJson(res, 400, { error: error.message }),
+      );
+      return;
+    }
+
+    // This device's own push registration: handled here and never forwarded,
+    // the same as pairing above — the harness has no such route and does not
+    // know devices exist. `identify` rather than `authenticate` because the
+    // handler needs to know *which* device, not just that the bearer was
+    // valid — the allowlist check above already guarantees the latter.
+    if (method === "PUT" && path === "/api/push") {
+      const id = options.identify(bearerToken(req.headers.authorization));
+      if (!id) return sendJson(res, 401, { error: "pair this device first" });
+      readJson(req).then(
+        (body) => {
+          const token = (body as { token?: unknown }).token ?? null;
+          if (
+            token !== null &&
+            (typeof token !== "string" || token.length > 200 || !/^[0-9a-f]+$/i.test(token))
+          ) {
+            return sendJson(res, 400, { error: "bad push token" });
+          }
+          options.setPushToken(id, token);
+          sendJson(res, 200, { ok: true });
         },
         (error: Error) => sendJson(res, 400, { error: error.message }),
       );

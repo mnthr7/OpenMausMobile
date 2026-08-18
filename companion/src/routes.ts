@@ -56,6 +56,8 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/interrupt$/ },
 
   // rooms
+  // making a room — group creation is a launch feature on the phone
+  { method: "POST", path: /^\/api\/groups$/ },
   { method: "PATCH", path: /^\/api\/groups\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/messages$/ },
 
@@ -63,6 +65,9 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: "GET", path: /^\/api\/threads\/[\w-]+\/messages$/ },
   { method: "GET", path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/image$/ },
   { method: "POST", path: /^\/api\/threads\/[\w-]+\/respond$/ },
+
+  // this device's own push registration; handled by the sidecar, never forwarded
+  { method: "PUT", path: /^\/api\/push$/ },
 ];
 
 /** Route families worth naming in the refusal.

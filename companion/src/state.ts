@@ -19,8 +19,17 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** OMB_COMPANION_DIR isolates a test rig from a real paired fleet. */
-export const DATA_DIR = process.env.OMB_COMPANION_DIR ?? join(homedir(), ".openmausbot-companion");
+/** OMB_DATA_DIR is the harness's own override (see server/config.ts:66) —
+ * honouring it here too means a container with one mounted volume can point
+ * both processes at it and have the sidecar's devices.json land next to the
+ * harness's config.json, rather than needing a second volume for a directory
+ * nothing else in the container has any reason to keep separate.
+ *
+ * OMB_COMPANION_DIR is checked next and keeps its old meaning: pin the
+ * sidecar's own directory without moving the harness's. It is also what
+ * isolates a test rig from a real paired fleet, same as before. */
+export const DATA_DIR =
+  process.env.OMB_DATA_DIR ?? process.env.OMB_COMPANION_DIR ?? join(homedir(), ".openmausbot-companion");
 
 /** 0700 on the directory, 0600 on the files it holds.
  *
