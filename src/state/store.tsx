@@ -131,7 +131,7 @@ export interface TaskUsage {
   output: number;
   /** null until any turn reported a cost — most engines never do; records
    * from builds before cost existed lack the field entirely */
-  costUsd: number | null;
+  costUsd?: number | null;
   turns: number;
 }
 
