@@ -16,6 +16,13 @@ describe("usage formatting", () => {
     expect(formatUsd(0.31)).toBe("$0.31");
   });
 
+  it("does not call toFixed on a missing cost (pre-cost saved tasks)", () => {
+    expect(formatUsd(undefined)).toBe("");
+    expect(formatUsd(null)).toBe("");
+    expect(formatUsd(Number.NaN)).toBe("");
+    expect(usageChip({ input: 10_000, output: 2_400, turns: 3 })).toBe("12.4k tok");
+  });
+
   it("builds the chip: tokens always, cost only when known, nothing when unused", () => {
     expect(usageChip({ input: 0, output: 0, costUsd: null, turns: 0 })).toBe("");
     expect(usageChip({ input: 10_000, output: 2_400, costUsd: null, turns: 3 })).toBe("12.4k tok");

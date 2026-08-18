@@ -241,11 +241,54 @@ async function startServerPackaged() {
   return false;
 }
 
-const ERROR_PAGE =
-  "data:text/html;charset=utf-8," +
-  encodeURIComponent(
-    `<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#070707;color:#fcfcfc;font:15px -apple-system,system-ui"><div style="text-align:center;max-width:360px"><div style="font-size:40px">🐭</div><h2 style="font-weight:600;margin:12px 0 6px">Couldn't start the bot server</h2><p style="color:#fcfcfc99;line-height:1.5">Something else is using its ports. Quit and reopen OpenMausBot — if it keeps happening, restart your computer.</p></div></body>`,
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[ch]);
+}
+
+function htmlErrorPage(title, body) {
+  return (
+    "data:text/html;charset=utf-8," +
+    encodeURIComponent(
+      `<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#070707;color:#fcfcfc;font:15px -apple-system,system-ui"><div style="text-align:center;max-width:400px"><div style="font-size:40px">🐭</div><h2 style="font-weight:600;margin:12px 0 6px">${escapeHtml(title)}</h2><p style="color:#fcfcfc99;line-height:1.5">${body}</p></div></body>`,
+    )
   );
+}
+
+const ERROR_PAGE = htmlErrorPage(
+  "Couldn't start the bot server",
+  "Something else is using its ports. Quit and reopen OpenMausBot — if it keeps happening, restart your computer.",
+);
+
+const DEV_WAIT_MS = 15_000;
+
+async function loadDevRenderer(win) {
+  const deadline = Date.now() + DEV_WAIT_MS;
+  while (!win.isDestroyed() && Date.now() < deadline) {
+    try {
+      const res = await fetch(DEV_URL, { signal: AbortSignal.timeout(800) });
+      if (res.ok) {
+        await win.loadURL(DEV_URL);
+        return;
+      }
+    } catch {
+      /* vite not listening yet */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  if (win.isDestroyed()) return;
+  await win.loadURL(
+    htmlErrorPage(
+      "Couldn't load the Vite app",
+      `OpenMausBot expected ${escapeHtml(DEV_URL)}. In the repo run <code style="color:#fcfcfc">pnpm install</code> then <code style="color:#fcfcfc">pnpm dev</code>, and keep that terminal open.`,
+    ),
+  );
+}
 
 let cuaReady = Promise.resolve({ mode: "unavailable", reason: "not-started" });
 
@@ -319,10 +362,22 @@ function createWindow() {
     });
   }
 
+  win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (app.isPackaged || !isMainFrame) return;
+    if (errorCode === -3) return; // aborted by a later navigation
+    if (!validatedURL || validatedURL.startsWith("data:")) return;
+    void win.loadURL(
+      htmlErrorPage(
+        "Couldn't load the Vite app",
+        `${escapeHtml(errorDescription)} (${errorCode}) loading ${escapeHtml(validatedURL)}. In the repo run <code style="color:#fcfcfc">pnpm install</code> then <code style="color:#fcfcfc">pnpm dev</code>.`,
+      ),
+    );
+  });
+
   if (app.isPackaged) {
     win.loadURL(serverReady ? `http://127.0.0.1:${SERVER_PORT}` : ERROR_PAGE);
   } else {
-    win.loadURL(DEV_URL);
+    void loadDevRenderer(win);
   }
   return win;
 }
