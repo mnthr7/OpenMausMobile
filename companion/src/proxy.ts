@@ -14,7 +14,8 @@
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 
 import { bearerToken } from "./devices.ts";
-import { denyReason } from "./routes.ts";
+import { MAX_INBOX_BYTES, readInboxFile, storeInboxFile } from "./inbox.ts";
+import { denyReason, isCloudDesktopJoin } from "./routes.ts";
 import { createSseScrubber, isJson, scrub } from "./wire.ts";
 
 /** What the forwarding handler needs from the process around it. */
@@ -22,7 +23,7 @@ export interface ProxyOptions {
   /** Where the harness is listening on loopback. */
   harnessPort: number;
   /** Does this bearer token belong to a paired device? */
-  authenticate: (token: string | undefined) => boolean;
+  authenticate: (token: string | undefined) => { cloudDesktopAccess: boolean } | null;
   /** Redeem a pairing code. Handled here and never forwarded: the harness
    * has no such route and no idea devices exist — pairing is the sidecar's
    * own concern, and the one thing a device does before it has a token. */
@@ -75,6 +76,38 @@ const readJson = (req: IncomingMessage, limit = 64 * 1024): Promise<Record<strin
       } catch {
         reject(new Error("invalid JSON body"));
       }
+    });
+  });
+
+/** Read a raw body, bounded. Used for the inbox: those bytes are a file,
+ * not JSON, and an unbounded read is a way to be memory-exhausted. Over
+ * the ceiling we reject without `destroy()` — the handler still has a 413
+ * to write, and killing the socket first is how a client sees a dropped
+ * connection instead of that status. */
+const readBytes = (req: IncomingMessage, limit: number): Promise<Buffer> =>
+  new Promise((resolve, reject) => {
+    let size = 0;
+    let settled = false;
+    const chunks: Buffer[] = [];
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    req.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      size += chunk.length;
+      if (size > limit) {
+        fail(new Error("body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("error", fail);
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
     });
   });
 
@@ -131,6 +164,8 @@ export function createProxyHandler(options: ProxyOptions) {
       return sendJson(res, 403, { error: "forbidden: cross-origin request" });
     }
 
+    const token = bearerToken(req.headers.authorization);
+    const device = options.authenticate(token);
     const denial = denyReason({
       path,
       method,
@@ -138,22 +173,86 @@ export function createProxyHandler(options: ProxyOptions) {
       // reimplemented: this file used to have a second one, and two parsers
       // that disagree about what a credential looks like means the header a
       // phone sends authenticates on one code path and not the other.
-      authenticated: options.authenticate(bearerToken(req.headers.authorization)),
+      authenticated: Boolean(device),
     });
     if (denial) return sendJson(res, denial.status, { error: denial.error });
+
+    // Pairing a phone grants the ordinary companion surface, not a browser
+    // session with every credential that may exist inside the cloud desktop.
+    // The computer owner enables this capability per device, off by default.
+    if (isCloudDesktopJoin(method, path) && !device?.cloudDesktopAccess) {
+      return sendJson(res, 403, {
+        error: "cloud desktop access is off for this phone — enable it in OpenMausBot → Settings → Companion",
+      });
+    }
 
     // Pairing terminates here. Forwarding it would hand the harness a route
     // it does not have, and the 404 would read to a phone as "wrong address".
     if (method === "POST" && path === "/api/pair") {
       readJson(req).then(
         (body) => {
-          const result = options.redeem(String(body.code ?? ""), body.deviceName);
+          // New clients redeem the high-entropy credential carried by the QR.
+          // `code` remains accepted for manual entry and older mobile builds.
+          const result = options.redeem(String(body.credential ?? body.code ?? ""), body.deviceName);
           if ("error" in result) return sendJson(res, 401, { error: result.error });
           return sendJson(res, 201, { ...result, serverName: options.serverName() });
         },
         (error: Error) => sendJson(res, 400, { error: error.message }),
       );
       return;
+    }
+
+    // Phone attachments terminate here. Forwarding them would hand the
+    // harness a route it does not have. The sidecar writes the bytes onto
+    // this computer and returns the path; the next request is an ordinary
+    // text message carrying `<attached-file path="…">`.
+    if (method === "POST" && path === "/api/inbox") {
+      readBytes(req, MAX_INBOX_BYTES).then(
+        (bytes) => {
+          try {
+            const header = req.headers["x-openmaus-filename"];
+            const raw = Array.isArray(header) ? header[0] : header;
+            let filename = "file";
+            try {
+              filename = decodeURIComponent(String(raw ?? "file"));
+            } catch {
+              filename = String(raw ?? "file");
+            }
+            return sendJson(res, 201, storeInboxFile(bytes, filename));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "could not store that file";
+            return sendJson(res, message.includes("too large") ? 413 : 400, { error: message });
+          }
+        },
+        (error: Error) => {
+          sendJson(res, error.message === "body too large" ? 413 : 400, { error: error.message });
+          // Drain whatever is still in flight so the 413 is not sitting
+          // behind a half-read body. Destroying the socket here is how a
+          // client sees a dropped connection instead of that status.
+          req.resume();
+        },
+      );
+      return;
+    }
+
+    if (method === "GET") {
+      const match = /^\/api\/inbox\/([^/]+)$/.exec(path);
+      if (match) {
+        let name = match[1];
+        try {
+          name = decodeURIComponent(name);
+        } catch {
+          return sendJson(res, 400, { error: "invalid filename" });
+        }
+        const stored = readInboxFile(name);
+        if (!stored) return sendJson(res, 404, { error: "no such file" });
+        res.writeHead(200, {
+          "content-type": stored.type,
+          "content-length": stored.bytes.length,
+        });
+        res.end(stored.bytes);
+        return;
+      }
     }
 
     const upstream = httpRequest(

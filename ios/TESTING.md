@@ -133,10 +133,10 @@ xcodebuild -project OpenMausCompanion.xcodeproj \
   CODE_SIGNING_ALLOWED=NO build
 ```
 
-**Re-run `xcodegen generate` whenever a pull adds a file to `App/`.** The
-generated project lists source files explicitly, so a new one is missing from
-the target until you regenerate, and the build fails with `Cannot find 'X' in
-scope` — which looks like a code error and is not one.
+**Quit Xcode, then re-run `xcodegen generate` once after this pull** (`App/`
+is a synced folder; new Swift files after that do not need a regenerate).
+Pulling while Xcode is open is what produces "Build input files cannot be
+found" for files the old project listed.
 
 ### If the app is letterboxed inside black bars
 
@@ -158,7 +158,14 @@ paid account is required to run on your own phone.
 
 On the phone, in order:
 
-1. **Pair.** The computer should appear by name. Tap it, type the code.
+1. **Pair.** In OpenMausBot → Settings → Companion, choose **Set up a
+   phone**. Scan the QR code with the phone's Camera, open OpenMausMobile,
+   confirm that the computer and six-digit code are filled in, then tap
+   **Connect**. The computer should also appear by name for the manual path:
+   tap it and type the same code.
+   - Relaunch the app after pairing once. It should return to the roster
+     without asking for another code; that proves the device token made it
+     into Keychain rather than only living in memory.
    - If the list stays empty, check in this order:
      1. **Local Network permission.** iOS asks once, and a denial is
         permanent and silent. Settings → OpenMausBot → Local Network. If the
@@ -204,7 +211,14 @@ On the phone, in order:
    phone mid-sentence and confirm it is not still listening when you come
    back. Opening the computer panel must also release it (ChatView stays
    mounted under the push).
-7. **Revoke.** Remove the device in Settings → Companion on the computer. The
+7. **Attach.** Open a chat, tap +, pick Attach Image / Take Photo / Choose
+   File. A chip should appear above the field. Send with or without a caption.
+   On the computer, the file lands under the sidecar inbox
+   (`~/.openmausbot-companion/inbox/`) and the bot's prompt contains
+   `<attached-file path="…">` — the same tag a desktop drop produces. The
+   first Take Photo prompts for Camera. A simulator has no camera and should
+   say so rather than crash. Eight files, 8 MB each, is the ceiling.
+8. **Revoke.** Remove the device in Settings → Companion on the computer. The
    phone should land on "This phone was unpaired" rather than silently failing.
 
 ---
@@ -232,9 +246,10 @@ so this is also how the phone reaches the Mac over cellular.
    `192.168.x.x` address, the sidecar could not find the Tailscale CLI — it
    asks once at startup, so turn the Companion toggle off and on again (or
    restart `pnpm companion` if running it by hand) after Tailscale is up.
-4. **On the phone:** pair by typing that name. Discovery does not help here —
-   Bonjour is multicast and a tailnet does not carry it — so the typed address
-   is the path, and it is the one path that works from anywhere.
+4. **On the phone:** scan the Companion panel's QR code, which carries that
+   MagicDNS name, or pair by typing the name. Discovery does not help here —
+   Bonjour is multicast and a tailnet does not carry it — so the QR/manual
+   address is the path, and it is the one path that works from anywhere.
 
 **Use the name, not the address.** Both reach the harness, but only the name
 gets past App Transport Security. iOS exempts local networking, and `100.64/10`
@@ -254,8 +269,12 @@ port — only the route to it is different.
 
 Not built yet, so not bugs:
 
-- **Nothing arrives while the app is closed.** No push until APNs.
-- **No call mode, spoken replies, routines, task management, or transcript search.** Composer dictation is in.
+- **Nothing arrives after the app is terminated.** Live and replayed notification
+  frames now become native alerts and badges, but closed-app push still needs an
+  APNs relay with project-owned Apple credentials.
+- **No call mode, spoken replies, or routine management.** Composer dictation
+  and photo/file attach are in. Tasks, SQLite transcript search/export,
+  reactions, and edit/version switching are available from the conversation UI.
 
 (Two entries that used to sit on this list have since shipped: replies stream
 token by token as the provider emits them, and each bot has a computer panel —

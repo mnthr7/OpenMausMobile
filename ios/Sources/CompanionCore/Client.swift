@@ -2,9 +2,9 @@
 //
 // Everything the phone can do to the harness, in one place. The rules it
 // encodes come from the default-deny policy in `companion/src/routes.ts`: a
-// paired phone may chat, answer approvals, and read rooms — it may not touch
-// credentials, pairing, or the Local VM. Those routes are simply absent here
-// rather than present and failing at runtime.
+// paired phone may chat, attach a file, answer approvals, and read rooms —
+// it may not touch credentials, pairing, or the Local VM. Those routes are
+// simply absent here rather than present and failing at runtime.
 import Foundation
 
 /// Where a companion connects, and with what. The token is *not* held here
@@ -113,6 +113,64 @@ public struct Connection: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// A pairing window handed from the desktop to the app as a QR/deep link.
+/// It contains only the address and a short-lived, single-use credential.
+/// New desktop builds put a high-entropy token in the QR; older builds carry
+/// the same six-digit code shown on screen. The long-lived device token is
+/// created later by `CompanionClient.pair` and never appears in the link.
+public struct PairingInvite: Equatable, Sendable {
+    public let connection: Connection
+    public let credential: String
+
+    public init(connection: Connection, credential: String) {
+        self.connection = connection
+        self.credential = credential
+    }
+
+    public static func parse(_ url: URL) -> PairingInvite? {
+        guard url.scheme?.lowercased() == "openmausbot",
+              url.host?.lowercased() == "pair",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else { return nil }
+
+        var values: [String: String] = [:]
+        for item in components.queryItems ?? [] {
+            guard values[item.name] == nil, let value = item.value else { return nil }
+            values[item.name] = value
+        }
+        guard let address = values["address"],
+              let credential = Self.credential(from: values),
+              var connection = Connection.parse(address)
+        else { return nil }
+
+        if let name = values["name"]?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            let cleaned = name.filter {
+                (!$0.isASCII && !$0.isNewline) || $0.asciiValue.map { $0 >= 32 && $0 != 127 } == true
+            }
+            if !cleaned.isEmpty { connection.name = String(cleaned.prefix(80)) }
+        }
+        return PairingInvite(connection: connection, credential: credential)
+    }
+
+    private static func credential(from values: [String: String]) -> String? {
+        if let token = values["token"] {
+            guard token.hasPrefix("omb_pair_"),
+                  token.utf8.count == 52,
+                  token.dropFirst("omb_pair_".count).utf8.allSatisfy({
+                      (48...57).contains($0) || (65...90).contains($0) ||
+                      (97...122).contains($0) || $0 == 45 || $0 == 95
+                  })
+            else { return nil }
+            return token
+        }
+        guard let code = values["code"],
+              code.utf8.count == 6,
+              code.utf8.allSatisfy({ (48...57).contains($0) })
+        else { return nil }
+        return code
+    }
+}
+
 public enum APIError: Error, LocalizedError, Sendable {
     /// The harness answered, and said no.
     case status(code: Int, message: String?)
@@ -150,6 +208,9 @@ public struct CompanionClient: Sendable {
     public let connection: Connection
     private let token: String?
     private let session: URLSession
+    /// RFC 3986 unreserved. Used for `X-OpenMaus-Filename` so the header
+    /// stays ASCII even when the photo is named in another script.
+    private static let filenameHeaderAllowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 
     public init(connection: Connection, token: String?, session: URLSession = .shared) {
         self.connection = connection
@@ -221,15 +282,26 @@ public struct CompanionClient: Sendable {
 
     // MARK: - Pairing
 
-    /// Redeem a code for a device token. The only call made without one.
+    /// Redeem a one-time pairing credential for a device token. The only call
+    /// made without a device token.
     public static func pair(
         connection: Connection,
-        code: String,
+        credential: String,
         deviceName: String,
         session: URLSession = .shared
     ) async throws -> PairResponse {
         let client = CompanionClient(connection: connection, token: nil, session: session)
-        let pairRequest = try client.makeRequest("POST", "/api/pair", body: ["code": code, "deviceName": deviceName])
+        // A six-digit credential is an older desktop or manual entry. Keep
+        // its field name for compatibility; new QR credentials use the
+        // explicit field and are never persisted by the app.
+        let key = credential.utf8.count == 6 && credential.utf8.allSatisfy({ (48...57).contains($0) })
+            ? "code"
+            : "credential"
+        let pairRequest = try client.makeRequest(
+            "POST",
+            "/api/pair",
+            body: [key: credential, "deviceName": deviceName]
+        )
         return try await client.send(pairRequest, as: PairResponse.self)
     }
 
@@ -249,6 +321,48 @@ public struct CompanionClient: Sendable {
         return try await send(try makeRequest("GET", "/api/threads/\(threadId)/messages", query: query), as: ThreadPage.self)
     }
 
+    /// A page containing one exact message, for landing on a search hit.
+    public func messages(threadId: String, around messageId: String, limit: Int = 50) async throws -> ThreadPage {
+        let query = [
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "around", value: messageId),
+        ]
+        return try await send(try makeRequest("GET", "/api/threads/\(threadId)/messages", query: query), as: ThreadPage.self)
+    }
+
+    public func search(_ query: String, limit: Int = 40) async throws -> [SearchHit] {
+        let items = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        return try await send(try makeRequest("GET", "/api/search", query: items), as: SearchResponse.self).hits
+    }
+
+    public func export(threadId: String, format: String) async throws -> TranscriptExport {
+        let request = try makeRequest(
+            "GET",
+            "/api/threads/\(threadId)/export",
+            query: [URLQueryItem(name: "format", value: format)]
+        )
+        let (data, response) = try await perform(request)
+        try Self.check(response, data)
+        let http = response as? HTTPURLResponse
+        let fallback = "transcript.\(format == "json" ? "json" : "md")"
+        let disposition = http?.value(forHTTPHeaderField: "Content-Disposition") ?? ""
+        let filenamePart = disposition
+            .split(separator: ";")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { $0.lowercased().hasPrefix("filename=") }
+        let filename = filenamePart.map {
+            String($0.dropFirst("filename=".count)).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        } ?? fallback
+        return TranscriptExport(
+            data: data,
+            filename: filename,
+            contentType: http?.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
+        )
+    }
+
     public func instances() async throws -> [Instance] {
         try await send(try makeRequest("GET", "/api/instances"), as: InstanceList.self).instances
     }
@@ -261,6 +375,25 @@ public struct CompanionClient: Sendable {
     public func image(threadId: String, messageId: String) async throws -> Data {
         let imageRequest = try makeRequest("GET", "/api/threads/\(threadId)/messages/\(messageId)/image")
         let (data, response) = try await perform(imageRequest)
+        try Self.check(response, data)
+        return data
+    }
+
+    /// Bytes the sidecar wrote for a phone attachment. Named by the inbox
+    /// file, not by a host path, so a stolen token cannot read the rest of
+    /// the computer.
+    public func inboxFile(named name: String) async throws -> Data {
+        // Same rule the sidecar uses: basename only, no leading dot, no
+        // traversal. The path is interpolated into the URL, so a `../`
+        // here would be a request for a different route entirely.
+        let base = URL(fileURLWithPath: name).lastPathComponent
+        guard base == name,
+              name.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]*$", options: .regularExpression) != nil
+        else { throw APIError.badURL }
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: Self.filenameHeaderAllowed) ?? name
+        var request = try makeRequest("GET", "/api/inbox/\(encoded)")
+        request.timeoutInterval = 60
+        let (data, response) = try await perform(request)
         try Self.check(response, data)
         return data
     }
@@ -282,6 +415,25 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("POST", "/api/groups/\(groupId)/messages", body: ["text": text]))
     }
 
+    /// Put a phone file onto the computer. The sidecar writes the bytes and
+    /// returns a host path; send that path as `<attached-file>` the way the
+    /// desktop composer already does. Not forwarded to the harness.
+    public func upload(data: Data, filename: String) async throws -> InboxFile {
+        var request = try makeRequest("POST", "/api/inbox")
+        // Photos over a tailnet are larger than a chat message. Twenty
+        // seconds is the right timeout for the rest of this client and the
+        // wrong one here.
+        request.timeoutInterval = 60
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        // RFC 3986 unreserved only: this value is an HTTP header, so spaces,
+        // quotes and non-ASCII have to leave as percent-escapes. The sidecar
+        // runs them through decodeURIComponent before sanitising the name.
+        let encoded = filename.addingPercentEncoding(withAllowedCharacters: Self.filenameHeaderAllowed) ?? "file"
+        request.setValue(encoded, forHTTPHeaderField: "X-OpenMaus-Filename")
+        request.httpBody = data
+        return try await send(request, as: InboxFile.self)
+    }
+
     /// Answer an approval or a question.
     ///
     /// Addressed by thread rather than by bot on purpose: a request raised
@@ -299,8 +451,59 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("POST", "/api/bots/\(botId)/always-allow", body: ["allowKey": key]))
     }
 
+    public func toggleReaction(threadId: String, messageId: String, emoji: String) async throws -> Message {
+        try await send(
+            try makeRequest(
+                "POST",
+                "/api/threads/\(threadId)/messages/\(messageId)/reactions",
+                body: ["emoji": emoji]
+            ),
+            as: MessageResponse.self
+        ).message
+    }
+
+    public func edit(botId: String, messageId: String, text: String) async throws {
+        try await send(try makeRequest("POST", "/api/bots/\(botId)/messages/\(messageId)/edit", body: ["text": text]))
+    }
+
+    public func setActiveBranch(botId: String, messageId: String) async throws -> String {
+        try await send(
+            try makeRequest("POST", "/api/bots/\(botId)/active-branch", body: ["messageId": messageId]),
+            as: ActiveBranchResponse.self
+        ).activeLeafId
+    }
+
+    public func createTask(botId: String, title: String? = nil) async throws -> Bot {
+        var body: [String: Any] = [:]
+        if let title, !title.isEmpty { body["title"] = title }
+        return try await send(try makeRequest("POST", "/api/bots/\(botId)/tasks", body: body), as: BotResponse.self).bot
+    }
+
+    public func switchTask(botId: String, threadId: String) async throws -> Bot {
+        try await send(try makeRequest("POST", "/api/bots/\(botId)/tasks/\(threadId)"), as: BotResponse.self).bot
+    }
+
+    public func renameTask(botId: String, threadId: String, title: String) async throws {
+        try await send(try makeRequest("PATCH", "/api/bots/\(botId)/tasks/\(threadId)", body: ["title": title]))
+    }
+
+    public func deleteTask(botId: String, threadId: String) async throws -> Bot {
+        try await send(try makeRequest("DELETE", "/api/bots/\(botId)/tasks/\(threadId)"), as: BotResponse.self).bot
+    }
+
     public func interrupt(botId: String) async throws {
         try await send(try makeRequest("POST", "/api/bots/\(botId)/interrupt"))
+    }
+
+    /// Mint a fresh interactive viewer for an existing cloud computer. The
+    /// response URL is a bearer credential: the caller presents it directly
+    /// and never stores it. The sidecar additionally requires this paired
+    /// device's cloud-desktop capability to be enabled on the Mac.
+    public func cloudDesktop(botId: String) async throws -> CloudDesktopSession {
+        try await send(
+            try makeRequest("POST", "/api/bots/\(botId)/computer/join"),
+            as: CloudDesktopSession.self
+        )
     }
 
     public func markRead(botId: String) async throws {

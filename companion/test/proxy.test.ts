@@ -7,9 +7,9 @@
 // through, and the harness's loopback gate rejecting a proxied request.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, request, type Server } from "node:http";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -71,6 +71,7 @@ const TOKEN = "omb_test_token";
 let harness: ChildProcess;
 let sidecar: Server;
 let home: string;
+let previousCompanionDir: string | undefined;
 let stderr = "";
 
 /** a request as a device makes it: a token, and a Host that is not loopback */
@@ -127,6 +128,8 @@ beforeAll(async () => {
   SIDECAR = `http://127.0.0.1:${SIDECAR_PORT}`;
 
   home = mkdtempSync(join(tmpdir(), "companion-test-"));
+  previousCompanionDir = process.env.OMB_COMPANION_DIR;
+  process.env.OMB_COMPANION_DIR = join(home, "companion-data");
   mkdirSync(join(home, ".openmausbot"), { recursive: true });
   writeFileSync(
     join(home, ".openmausbot", "config.json"),
@@ -167,7 +170,7 @@ beforeAll(async () => {
   sidecar = createServer(
     createProxyHandler({
       harnessPort: HARNESS_PORT,
-      authenticate: (t) => t === TOKEN,
+      authenticate: (t) => (t === TOKEN ? { cloudDesktopAccess: true } : null),
       redeem: (code, deviceName) =>
         code === "424242"
           ? { token: TOKEN, device: { id: "d1", name: String(deviceName) } }
@@ -201,6 +204,8 @@ afterAll(async () => {
     setTimeout(resolve, 10_000).unref?.();
   });
   rmSync(home, { recursive: true, force: true });
+  if (previousCompanionDir === undefined) delete process.env.OMB_COMPANION_DIR;
+  else process.env.OMB_COMPANION_DIR = previousCompanionDir;
 });
 
 describe("the sidecar in front of an unmodified harness", () => {
@@ -233,6 +238,50 @@ describe("the sidecar in front of an unmodified harness", () => {
     expect((await device("GET", "/api/bots", { token: null })).status).toBe(401);
     expect((await device("GET", "/api/bots", { token: "omb_wrong" })).status).toBe(401);
     expect((await device("GET", "/api/bots")).status).toBe(200);
+  });
+
+  it("writes an uploaded file onto this computer and returns a path the bot can open", async () => {
+    const payload = Buffer.from("hello from the phone");
+    const res = await fetch(`${SIDECAR}/api/inbox`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/octet-stream",
+        "x-openmaus-filename": encodeURIComponent("notes.txt"),
+      },
+      body: payload,
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { path: string; name: string; size: number };
+    expect(body.name).toBe("notes.txt");
+    expect(body.size).toBe(payload.length);
+    expect(body.path.startsWith(join(home, "companion-data", "inbox"))).toBe(true);
+    expect(readFileSync(body.path, "utf8")).toBe("hello from the phone");
+
+    const stored = basename(body.path);
+    const got = await fetch(`${SIDECAR}/api/inbox/${stored}`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(got.status).toBe(200);
+    expect(got.headers.get("content-type")).toBe("application/octet-stream");
+    expect(Buffer.from(await got.arrayBuffer()).toString("utf8")).toBe("hello from the phone");
+    expect((await device("GET", `/api/inbox/${stored}`, { token: null })).status).toBe(401);
+    expect((await device("GET", "/api/inbox/no-such-file.txt")).status).toBe(404);
+  });
+
+  it("refuses an inbox upload without a token, and a body over the ceiling", async () => {
+    expect((await device("POST", "/api/inbox", { token: null })).status).toBe(401);
+    expect((await device("GET", "/api/inbox")).status).toBe(404);
+    const res = await fetch(`${SIDECAR}/api/inbox`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/octet-stream",
+        "x-openmaus-filename": "too-big.bin",
+      },
+      body: Buffer.alloc(8 * 1024 * 1024 + 1),
+    });
+    expect(res.status).toBe(413);
   });
 
   it("refuses what a device has no business doing, by default", async () => {
@@ -368,7 +417,7 @@ describe("the sidecar in front of an unmodified harness", () => {
     const orphan = createServer(
       createProxyHandler({
         harnessPort: 1,
-        authenticate: () => true,
+        authenticate: () => ({ cloudDesktopAccess: true }),
         redeem: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
@@ -400,7 +449,7 @@ describe("the sidecar in front of an unmodified harness", () => {
     const stalled = createServer(
       createProxyHandler({
         harnessPort: mutePort,
-        authenticate: () => true,
+        authenticate: () => ({ cloudDesktopAccess: true }),
         redeem: () => ({ error: "no" }),
         serverName: () => "Test computer",
         // the shipped value is 30s; the behaviour under test is the same one
@@ -451,7 +500,7 @@ describe("the sidecar in front of an unmodified harness", () => {
     const relay = createServer(
       createProxyHandler({
         harnessPort: slowPort,
-        authenticate: () => true,
+        authenticate: () => ({ cloudDesktopAccess: true }),
         redeem: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
@@ -510,7 +559,7 @@ describe("the sidecar in front of an unmodified harness", () => {
     const relay = createServer(
       createProxyHandler({
         harnessPort: floodPort,
-        authenticate: () => true,
+        authenticate: () => ({ cloudDesktopAccess: true }),
         redeem: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
@@ -535,11 +584,12 @@ describe("the sidecar in front of an unmodified harness", () => {
 });
 
 // The whole loop, with the real registry rather than a stub: open a pairing
-// window on the control surface, redeem the code the way the phone does, and
+// window on the control surface, redeem its QR credential the way the phone
+// does, and
 // use the token that comes back. This is the path that has no unit-test
 // equivalent — every piece is real except the phone.
 describe("pairing, end to end", () => {
-  it("turns a code shown on the computer into a working device token", async () => {
+  it("turns a QR credential into a working device token", async () => {
     const { DeviceRegistry } = await import("../src/devices.ts");
     const { createControlServer } = await import("../src/control.ts");
 
@@ -547,7 +597,7 @@ describe("pairing, end to end", () => {
     const paired = createServer(
       createProxyHandler({
         harnessPort: HARNESS_PORT,
-        authenticate: (t) => Boolean(registry.authenticate(t ?? undefined)),
+        authenticate: (t) => registry.authenticate(t ?? undefined),
         redeem: (code, deviceName) => registry.redeem(code, deviceName),
         serverName: () => "Ada's computer",
       }),
@@ -572,9 +622,13 @@ describe("pairing, end to end", () => {
 
       // the person clicks "Start pairing" on the computer
       // SAFETY: POST /pairing is this sidecar's own API and always answers
-      // with the window's code; the toMatch below fails if the shape drifts.
-      const opened = (await (await fetch(`${ctl}/pairing`, { method: "POST" })).json()) as { code: string };
+      // with both credentials; the matches below fail if the shape drifts.
+      const opened = (await (await fetch(`${ctl}/pairing`, { method: "POST" })).json()) as {
+        code: string;
+        token: string;
+      };
       expect(opened.code).toMatch(/^\d{6}$/);
+      expect(opened.token).toMatch(/^omb_pair_[A-Za-z0-9_-]{43}$/);
 
       // a wrong code is refused, and does not burn the window
       const wrong = await fetch(`${base}/api/pair`, {
@@ -584,11 +638,11 @@ describe("pairing, end to end", () => {
       });
       expect(wrong.status).toBe(401);
 
-      // the right one is redeemed exactly once, and never forwarded upstream
+      // The QR token is redeemed exactly once and never forwarded upstream.
       const res = await fetch(`${base}/api/pair`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code: opened.code, deviceName: "Ada's iPhone" }),
+        body: JSON.stringify({ credential: opened.token, deviceName: "Ada's iPhone" }),
       });
       expect(res.status).toBe(201);
       // SAFETY: a 201 from /api/pair carries exactly this shape — the

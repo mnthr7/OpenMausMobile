@@ -10,7 +10,9 @@
 import Foundation
 import OSLog
 import SwiftUI
+import UIKit
 import CompanionCore
+import UserNotifications
 
 /// Stream lifecycle, in Console.app and the Xcode console. A companion that
 /// is silently not connected looks exactly like one with nothing to say, so
@@ -33,6 +35,11 @@ final class Session: ObservableObject {
     @Published private(set) var status: Status = .unpaired
     /// Transient, user-facing failures from an action they just took.
     @Published var actionError: String?
+    /// One exact message the next opened chat should reveal.
+    @Published private(set) var focusedMessageId: String?
+    @Published private(set) var notificationAuthorization: UNAuthorizationStatus = .notDetermined
+    /// A short-lived desktop handoff waiting for PairingView to present it.
+    @Published private(set) var pairingInvite: PairingInvite?
 
     private var client: CompanionClient?
     private var streamTask: Task<Void, Never>?
@@ -40,6 +47,9 @@ final class Session: ObservableObject {
     /// can finish after its replacement starts; its cleanup must not clear
     /// the replacement's handle.
     private var streamGeneration = 0
+    /// Bumped when the paired computer changes so an in-flight upload cannot
+    /// be sent through a later client.
+    private var clientGeneration = 0
     private var reconnectDelay: UInt64 = 0
     /// How many computer panels are open. A count rather than a flag: the
     /// panel can be pushed twice in a navigation stack, and the last one to
@@ -54,7 +64,20 @@ final class Session: ObservableObject {
     // MARK: - Pairing
 
     init() {
+        _ = NotificationCoordinator.shared
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-store-preview"),
+           let url = Bundle.main.url(forResource: "StorePreview", withExtension: "json"),
+           let data = try? Data(contentsOf: url),
+           let fleet = try? JSONDecoder().decode(Fleet.self, from: data) {
+            connection = Connection(name: "Preview Mac", host: "preview.tailnet.ts.net", port: 8810)
+            state.hydrate(fleet)
+            status = .live
+            return
+        }
+#endif
         restore()
+        Task { await refreshNotificationAuthorization() }
     }
 
     /// Rebuild the last connection at launch.
@@ -96,11 +119,15 @@ final class Session: ObservableObject {
         status = .connecting
     }
 
-    /// Redeem a pairing code. On success the token goes to the keychain and
-    /// the connection to defaults — deliberately apart, so the thing that
-    /// gets backed up is never the credential.
-    func pair(with connection: Connection, code: String, deviceName: String) async throws {
-        let paired = try await CompanionClient.pair(connection: connection, code: code, deviceName: deviceName)
+    /// Redeem a one-time pairing credential. On success the device token goes
+    /// to the keychain and the connection to defaults — deliberately apart,
+    /// so the thing that gets backed up is never the credential.
+    func pair(with connection: Connection, credential: String, deviceName: String) async throws {
+        let paired = try await CompanionClient.pair(
+            connection: connection,
+            credential: credential,
+            deviceName: deviceName
+        )
         // prefer the name the computer calls itself over the Bonjour label
         var stored = connection
         if !paired.serverName.isEmpty { stored.name = paired.serverName }
@@ -108,16 +135,35 @@ final class Session: ObservableObject {
         try Keychain.save(paired.token, for: stored.id)
         UserDefaults.standard.set(try? JSONEncoder().encode(stored), forKey: Self.connectionKey)
 
+        clientGeneration += 1
         self.connection = stored
         self.client = CompanionClient(connection: stored, token: paired.token)
         self.state = CompanionState()
+        forgetAttachmentPreviews()
         // A fresh pairing settles any restore that was still waiting on the
         // keychain — the token is in hand, so there is nothing left to retry.
         restorePending = false
         connect()
     }
 
+    func receivePairingURL(_ url: URL) {
+        guard status == .unpaired else {
+            actionError = "This phone is already paired. Unpair it in Settings before connecting it to another computer."
+            return
+        }
+        guard let invite = PairingInvite.parse(url) else {
+            actionError = "That pairing invitation is not valid. Start pairing again on your computer."
+            return
+        }
+        pairingInvite = invite
+    }
+
+    func consumePairingInvite() {
+        pairingInvite = nil
+    }
+
     func signOut() {
+        clientGeneration += 1
         streamTask?.cancel()
         streamTask = nil
         restorePending = false
@@ -126,6 +172,8 @@ final class Session: ObservableObject {
         connection = nil
         client = nil
         state = CompanionState()
+        forgetAttachmentPreviews()
+        NotificationCoordinator.shared.setBadge(0)
         status = .unpaired
     }
 
@@ -235,6 +283,10 @@ final class Session: ObservableObject {
                         continue
                     }
                     state.apply(frame)
+                    if case let .notify(notification) = frame.frame {
+                        NotificationCoordinator.shared.deliver(notification, sequence: frame.seq)
+                    }
+                    NotificationCoordinator.shared.setBadge(state.unreadCount)
                     state.advance(to: frame.seq)
                 }
                 // the stream ended without an error — the harness went away
@@ -268,6 +320,7 @@ final class Session: ObservableObject {
         let fleet = try await client.fleet(messages: 50)
         log.info("hydrated \(fleet.bots.count, privacy: .public) bots, \(fleet.groups.count, privacy: .public) rooms")
         state.hydrate(fleet)
+        NotificationCoordinator.shared.setBadge(state.unreadCount)
     }
 
     // MARK: - Actions
@@ -277,12 +330,42 @@ final class Session: ObservableObject {
     // the source of truth, and a phone that draws its own version of events
     // is a phone that disagrees with the laptop.
 
-    func send(_ text: String, to chat: Chat) async {
-        await perform {
+    func send(_ text: String, to chat: Chat) async -> Bool {
+        actionError = nil
+        let generation = clientGeneration
+        guard let client else { return false }
+        do {
             switch chat {
-            case let .bot(bot): try await $0.send(text: text, toBot: bot.id)
-            case let .room(room): try await $0.send(text: text, toRoom: room.id)
+            case let .bot(bot): try await client.send(text: text, toBot: bot.id)
+            case let .room(room): try await client.send(text: text, toRoom: room.id)
             }
+            guard generation == clientGeneration else { return false }
+            return true
+        } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            return false
+        } catch {
+            actionError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Write a phone file onto the computer. Returns the host path to fold
+    /// into the next message; the harness never sees the bytes.
+    func upload(_ data: Data, filename: String) async -> InboxFile? {
+        actionError = nil
+        let generation = clientGeneration
+        guard let client else { return nil }
+        do {
+            let stored = try await client.upload(data: data, filename: filename)
+            guard generation == clientGeneration else { return nil }
+            return stored
+        } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            return nil
+        } catch {
+            actionError = error.localizedDescription
+            return nil
         }
     }
 
@@ -335,6 +418,18 @@ final class Session: ObservableObject {
         await perform { try await $0.interrupt(botId: bot.id) }
     }
 
+    /// Ask for one fresh cloud viewer URL. Unlike ordinary actions this
+    /// returns the value to a browser sheet and never writes it to app state.
+    func cloudDesktop(for bot: Bot) async throws -> URL {
+        guard let client else { throw APIError.transport("This computer is offline.") }
+        do {
+            return try await client.cloudDesktop(botId: bot.id).url
+        } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            throw error
+        }
+    }
+
     func markRead(_ chat: Chat) async {
         await perform(quietly: true) {
             switch chat {
@@ -356,6 +451,175 @@ final class Session: ObservableObject {
 
     func image(threadId: String, messageId: String) async -> Data? {
         try? await client?.image(threadId: threadId, messageId: messageId)
+    }
+
+    func inboxFile(named name: String) async -> Data? {
+        guard let client else { return nil }
+        do {
+            return try await client.inboxFile(named: name)
+        } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    func search(_ query: String) async -> [SearchHit] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2, let client else { return [] }
+        do { return try await client.search(trimmed) }
+        catch {
+            actionError = error.localizedDescription
+            return []
+        }
+    }
+
+    /// Resolve a SQLite search hit into the live task/branch, load a page
+    /// around it, and hand navigation the current chat record.
+    func open(_ hit: SearchHit) async -> Chat? {
+        guard let client else { return nil }
+        do {
+            if let botId = hit.botId, var bot = state.bot(botId) {
+                if bot.threadId != hit.threadId {
+                    bot = try await client.switchTask(botId: bot.id, threadId: hit.threadId)
+                    state.apply(.bot(bot))
+                }
+                if !hit.onActivePath {
+                    let leaf = try await client.setActiveBranch(botId: bot.id, messageId: hit.messageId)
+                    state.apply(.thread(threadId: hit.threadId, activeLeafId: leaf))
+                }
+                let page = try await client.messages(threadId: hit.threadId, around: hit.messageId)
+                state.merge(page, intoThread: hit.threadId)
+                focusedMessageId = hit.messageId
+                return state.bot(bot.id).map(Chat.bot)
+            }
+            if let groupId = hit.groupId,
+               let room = state.rooms.first(where: { $0.id == groupId }) {
+                let page = try await client.messages(threadId: hit.threadId, around: hit.messageId)
+                state.merge(page, intoThread: hit.threadId)
+                focusedMessageId = hit.messageId
+                return .room(room)
+            }
+        } catch { actionError = error.localizedDescription }
+        return nil
+    }
+
+    func consumeFocus(_ messageId: String) {
+        if focusedMessageId == messageId { focusedMessageId = nil }
+    }
+
+    func createTask(for bot: Bot, title: String?) async {
+        guard let client else { return }
+        do { state.apply(.bot(try await client.createTask(botId: bot.id, title: title))) }
+        catch { actionError = error.localizedDescription }
+    }
+
+    func switchTask(_ task: BotTask, for bot: Bot) async {
+        guard let client, task.threadId != bot.threadId else { return }
+        do { state.apply(.bot(try await client.switchTask(botId: bot.id, threadId: task.threadId))) }
+        catch { actionError = error.localizedDescription }
+    }
+
+    func renameTask(_ task: BotTask, for bot: Bot, title: String) async {
+        guard let client else { return }
+        do {
+            try await client.renameTask(botId: bot.id, threadId: task.threadId, title: title)
+            await refresh()
+        } catch { actionError = error.localizedDescription }
+    }
+
+    func deleteTask(_ task: BotTask, for bot: Bot) async {
+        guard let client else { return }
+        do { state.apply(.bot(try await client.deleteTask(botId: bot.id, threadId: task.threadId))) }
+        catch { actionError = error.localizedDescription }
+    }
+
+    func react(to message: Message, in threadId: String, emoji: String) async {
+        guard let client else { return }
+        do {
+            let patched = try await client.toggleReaction(threadId: threadId, messageId: message.id, emoji: emoji)
+            state.apply(.messagePatch(threadId: threadId, message: patched))
+        } catch { actionError = error.localizedDescription }
+    }
+
+    func edit(_ message: Message, for bot: Bot, text: String) async {
+        await perform { try await $0.edit(botId: bot.id, messageId: message.id, text: text) }
+    }
+
+    func switchVersion(to message: Message, for bot: Bot) async {
+        guard let client else { return }
+        do {
+            let leaf = try await client.setActiveBranch(botId: bot.id, messageId: message.id)
+            state.apply(.thread(threadId: bot.threadId, activeLeafId: leaf))
+        } catch { actionError = error.localizedDescription }
+    }
+
+    func export(threadId: String, format: String) async -> URL? {
+        guard let client else { return nil }
+        do {
+            let exported = try await client.export(threadId: threadId, format: format)
+            let name = URL(fileURLWithPath: exported.filename).lastPathComponent
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+            try exported.data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Thumbnails of files this session just sent, keyed by the host path
+    /// in the message. The bubble uses them so a photo appears before the
+    /// sidecar round-trip, and after a restart the GET above fills in.
+    private static let maxAttachmentPreviews = 24
+    private var attachmentPreviews: [String: UIImage] = [:]
+    private var attachmentPreviewOrder: [String] = []
+
+    func rememberPreview(_ image: UIImage, for path: String) {
+        attachmentPreviews[path] = PendingMedia.thumbnail(from: image)
+        attachmentPreviewOrder.removeAll { $0 == path }
+        attachmentPreviewOrder.append(path)
+        while attachmentPreviewOrder.count > Self.maxAttachmentPreviews {
+            let old = attachmentPreviewOrder.removeFirst()
+            attachmentPreviews.removeValue(forKey: old)
+        }
+    }
+
+    func preview(for path: String) -> UIImage? {
+        attachmentPreviews[path]
+    }
+
+    private func forgetAttachmentPreviews() {
+        attachmentPreviews.removeAll()
+        attachmentPreviewOrder.removeAll()
+    }
+
+    func refreshNotificationAuthorization() async {
+        notificationAuthorization = await NotificationCoordinator.shared.authorizationStatus()
+    }
+
+    func enableNotifications() async {
+        if notificationAuthorization == .denied {
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                await UIApplication.shared.open(url)
+            }
+            return
+        }
+        _ = await NotificationCoordinator.shared.requestAuthorization()
+        await refreshNotificationAuthorization()
+        NotificationCoordinator.shared.setBadge(state.unreadCount)
+    }
+
+    var notificationStatusText: String {
+        switch notificationAuthorization {
+        case .authorized: return "On"
+        case .provisional: return "Quietly on"
+        case .ephemeral: return "Temporarily on"
+        case .denied: return "Off in Settings"
+        case .notDetermined: return "Not enabled"
+        @unknown default: return "Unknown"
+        }
     }
 
     private func perform(quietly: Bool = false, _ body: (CompanionClient) async throws -> Void) async {
@@ -498,11 +762,23 @@ extension CompanionState {
     private static func preview(of last: Message?) -> String {
         guard let last else { return "" }
         switch last.kind {
-        case .text: return last.text ?? ""
+        case .text:
+            return Self.previewText(last.text ?? "")
         case .options: return last.card?.isPending == true ? "Waiting on you" : (last.card?.title ?? "")
         case .activity: return last.tool?.name ?? ""
         case .screen: return "Screenshot"
         case .unknown: return last.text ?? ""
         }
+    }
+
+    /// Hide `<attached-file>` tags in the roster. The path is for the agent.
+    private static func previewText(_ text: String) -> String {
+        let shown = Attachment.display(text)
+        if shown.files.isEmpty { return shown.caption }
+        if shown.caption.isEmpty {
+            if shown.files.count == 1 { return shown.files[0].displayName }
+            return "\(shown.files.count) files"
+        }
+        return shown.caption
     }
 }
