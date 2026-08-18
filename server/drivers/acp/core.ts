@@ -35,6 +35,7 @@ import type {
 } from "../../contracts.ts";
 import { newEventId, newId } from "../../contracts.ts";
 import { computerProxyEnv } from "../../container-computer.ts";
+import { CLI_PROBE_TIMEOUT_MS } from "../../config.ts";
 import { augmentedPath } from "../../env-path.ts";
 
 // the computer proxy entry: .ts in dev (node type stripping), .js in the
@@ -644,7 +645,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
       const snapshot = async (): Promise<ProviderSnapshot> => {
         const env = childEnv();
         const version = await new Promise<string | null>((resolve) => {
-          execCli(config.cli, ["--version"], { timeout: 8000, env }, (err, stdout) =>
+          execCli(config.cli, ["--version"], { timeout: CLI_PROBE_TIMEOUT_MS, env }, (err, stdout) =>
             resolve(err ? null : stdout.trim()),
           );
         });

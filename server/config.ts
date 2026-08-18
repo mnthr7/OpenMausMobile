@@ -64,6 +64,12 @@ export function parseConfigPatch(value: JsonValue): ConfigPatch {
 
 // OMB_DATA_DIR isolates test/soak rigs from the user's real fleet.
 export const DATA_DIR = process.env.OMB_DATA_DIR ?? join(homedir(), ".openmausbot");
+
+/** How long a `<cli> --version` availability probe may take. 8s is generous
+ * on a laptop, but a cold Node CLI on a shared-cpu cloud VM can take 10s+,
+ * and a probe that times out reports the CLI as not installed — so headless
+ * deployments raise it via OMB_CLI_PROBE_TIMEOUT_MS. Never below 8s. */
+export const CLI_PROBE_TIMEOUT_MS = Math.max(8000, Number(process.env.OMB_CLI_PROBE_TIMEOUT_MS) || 8000);
 const LEGACY_DATA_DIR = join(homedir(), ".opengrokbot");
 export const EVENTS_DIR = join(DATA_DIR, "events");
 export const NATIVE_DIR = join(DATA_DIR, "native");

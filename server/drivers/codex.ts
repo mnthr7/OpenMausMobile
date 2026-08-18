@@ -11,6 +11,7 @@
 // and falls back to a fresh thread/start.
 import { homedir } from "node:os";
 
+import { CLI_PROBE_TIMEOUT_MS } from "../config.ts";
 import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 
 import type {
@@ -437,13 +438,13 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     const snapshot = async (): Promise<ProviderSnapshot> => {
       const env = childEnv();
       const version = await new Promise<string | null>((resolve) => {
-        execCli(config.cli, ["--version"], { timeout: 8000, env }, (err, stdout) =>
+        execCli(config.cli, ["--version"], { timeout: CLI_PROBE_TIMEOUT_MS, env }, (err, stdout) =>
           resolve(err ? null : stdout.trim()),
         );
       });
       if (!version) return { state: "unavailable", reason: `\`${config.cli}\` CLI not found` };
       const authenticated = await new Promise<boolean>((resolve) => {
-        execCli(config.cli, ["login", "status"], { timeout: 8000, env }, (err, stdout) =>
+        execCli(config.cli, ["login", "status"], { timeout: CLI_PROBE_TIMEOUT_MS, env }, (err, stdout) =>
           resolve(!err && /logged in/i.test(stdout)),
         );
       });

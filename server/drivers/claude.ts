@@ -14,7 +14,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DATA_DIR } from "../config.ts";
+import { CLI_PROBE_TIMEOUT_MS, DATA_DIR } from "../config.ts";
 import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 
@@ -46,7 +46,7 @@ export function claudeSignedIn(
   run: typeof execCli = execCli,
 ): Promise<boolean> {
   return new Promise((resolve) => {
-    run(cli, ["auth", "status", "--json"], { timeout: 8000, env }, (_error, stdout) => {
+    run(cli, ["auth", "status", "--json"], { timeout: CLI_PROBE_TIMEOUT_MS, env }, (_error, stdout) => {
       try {
         const status: unknown = JSON.parse(stdout);
         resolve(
@@ -613,7 +613,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     const snapshot = async (): Promise<ProviderSnapshot> => {
       const env = claudeEnvironment(undefined, { ...process.env, ...input.environment });
       const version = await new Promise<string | null>((resolve) => {
-        execCli(config.cli, ["--version"], { timeout: 8000, env }, (err, stdout) =>
+        execCli(config.cli, ["--version"], { timeout: CLI_PROBE_TIMEOUT_MS, env }, (err, stdout) =>
           resolve(err ? null : stdout.trim()),
         );
       });

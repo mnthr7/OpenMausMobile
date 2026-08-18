@@ -15,7 +15,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { DATA_DIR } from "../config.ts";
+import { CLI_PROBE_TIMEOUT_MS, DATA_DIR } from "../config.ts";
 import { augmentedPath } from "../env-path.ts";
 import { injectedApiModel, mergeLocalInject } from "./local-inject.ts";
 
@@ -375,7 +375,7 @@ export const AntigravityDriver: ProviderDriver<AntigravityConfig> = {
 
     const snapshot = async (): Promise<ProviderSnapshot> => {
       const version = await new Promise<string | null>((resolve) => {
-        execCli(config.cli, ["--version"], { timeout: 8000, env: { ...process.env, PATH: augmentedPath() } }, (err, stdout) =>
+        execCli(config.cli, ["--version"], { timeout: CLI_PROBE_TIMEOUT_MS, env: { ...process.env, PATH: augmentedPath() } }, (err, stdout) =>
           resolve(err ? null : stdout.trim()),
         );
       });
