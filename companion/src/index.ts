@@ -30,6 +30,7 @@ import {
   MdnsResponder,
   type ServiceInfo,
 } from "./mdns.ts";
+import { startNotifier } from "./notifier.ts";
 import { createProxyHandler } from "./proxy.ts";
 
 /** A port from the environment, or the default. Anything that is not a whole
@@ -97,6 +98,12 @@ async function refreshMachineName(): Promise<void> {
 
 const devices = new DeviceRegistry();
 const mdns = new MdnsResponder();
+
+/** The relay notifier, started only when a relay URL is configured — no
+ * env var, no process. Assigned once `main` brings the listeners up, since
+ * `pushTokens` reading from `devices` is only meaningful once devices can
+ * register one. */
+let notifier: { stop(): void } | null = null;
 
 /** This machine as a Bonjour record: one DNS label, the device port, and the
  * addresses a phone could reach it on. */
@@ -195,6 +202,13 @@ async function main(): Promise<void> {
   await listen(control, CONTROL_PORT, "127.0.0.1");
   await listen(companion, COMPANION_PORT, "0.0.0.0");
 
+  // Env-gated: a relay URL turns this on, and nothing else does. No env
+  // var, no outbound connection, no process watching the harness's SSE.
+  const relayUrl = process.env.QURELAY_RELAY_URL?.trim();
+  if (relayUrl) {
+    notifier = startNotifier({ harnessPort: HARNESS_PORT, relayUrl, pushTokens: () => devices.pushTokens() });
+  }
+
   // Before advertising: the service name goes into the Bonjour record, and
   // re-advertising under a new name later would show the phone two computers.
   await refreshMachineName();
@@ -232,6 +246,7 @@ async function main(): Promise<void> {
  * is the off switch, so it has to actually stop. */
 const shutdown = async (signal: string): Promise<void> => {
   console.log(`\n${signal} — stopping`);
+  notifier?.stop();
   await mdns.stop().catch(() => {});
   // close() waits for open connections, and an SSE stream never ends on its
   // own — drop the sockets so "stop" means stopped, now.
