@@ -11,7 +11,7 @@
 // and falls back to a fresh thread/start.
 import { homedir } from "node:os";
 
-import { CLI_PROBE_TIMEOUT_MS } from "../config.ts";
+import { ALLOW_ENV_API_KEYS, CLI_PROBE_TIMEOUT_MS } from "../config.ts";
 import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 
 import type {
@@ -78,7 +78,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       };
       // The CLI owns its own ChatGPT login; a leaked API key silently flips
       // billing to pay-as-you-go (agentcal).
-      delete env.OPENAI_API_KEY;
+      if (!ALLOW_ENV_API_KEYS) delete env.OPENAI_API_KEY;
       return env;
     };
     const catalogEnv = childEnv();

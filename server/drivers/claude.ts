@@ -14,7 +14,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { CLI_PROBE_TIMEOUT_MS, DATA_DIR } from "../config.ts";
+import { ALLOW_ENV_API_KEYS, CLI_PROBE_TIMEOUT_MS, DATA_DIR } from "../config.ts";
 import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 
@@ -74,7 +74,7 @@ function claudeEnvironment(
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
   const applied = applyClaudeInject(env, model);
-  if (!applied.injected) delete env.ANTHROPIC_API_KEY;
+  if (!applied.injected && !ALLOW_ENV_API_KEYS) delete env.ANTHROPIC_API_KEY;
   return env;
 }
 

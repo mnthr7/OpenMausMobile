@@ -65,6 +65,11 @@ export function parseConfigPatch(value: JsonValue): ConfigPatch {
 // OMB_DATA_DIR isolates test/soak rigs from the user's real fleet.
 export const DATA_DIR = process.env.OMB_DATA_DIR ?? join(homedir(), ".openmausbot");
 
+/** Headless BYO-key deployments set OMB_ALLOW_ENV_API_KEYS=1: there is no
+ * subscription login on the box, so the environment key IS the credential
+ * and stripping it (the desktop's billing protection) just breaks turns. */
+export const ALLOW_ENV_API_KEYS = process.env.OMB_ALLOW_ENV_API_KEYS === "1";
+
 /** How long a `<cli> --version` availability probe may take. 8s is generous
  * on a laptop, but a cold Node CLI on a shared-cpu cloud VM can take 10s+,
  * and a probe that times out reports the CLI as not installed — so headless
