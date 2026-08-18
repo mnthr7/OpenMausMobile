@@ -68,3 +68,86 @@ it("sends nothing when no device has a push token", async () => {
   notifier.stop();
   expect(received).toEqual([]);
 });
+
+it("drains a non-200 response and reconnects instead of reading it as a stream", async () => {
+  const received: any[] = [];
+  let connections = 0;
+  const notifyFrame = JSON.stringify({
+    kind: "notify",
+    notification: { kind: "done", botId: "b1", botName: "Coder", threadId: "t1", title: "Coder finished", body: "shipped it" },
+  });
+  const server = createServer((_req, res) => {
+    connections++;
+    if (connections === 1) {
+      // The harness mid-restart, or a proxy's 502 — not a stream to read.
+      res.writeHead(503);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${notifyFrame}\n\n`);
+    // hold the stream open; the notifier owns reconnects
+  });
+  servers.push(server);
+  const harnessPort = await new Promise<number>((r) => server.listen(0, "127.0.0.1", () => r((server.address() as any).port)));
+  const relayPort = await fakeRelay(received);
+  const notifier = startNotifier({
+    harnessPort,
+    relayUrl: `http://127.0.0.1:${relayPort}`,
+    pushTokens: () => ["ab".repeat(32)],
+    backoffMinMs: 20,
+  });
+  await expect.poll(() => received.length).toBe(1);
+  notifier.stop();
+  expect(connections).toBeGreaterThanOrEqual(2);
+  expect(received[0]).toEqual({ deviceTokens: ["ab".repeat(32)], kind: "done", botName: "Coder" });
+});
+
+it("delivers a notify frame whose JSON is split across two chunks", async () => {
+  const received: any[] = [];
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write('data: {"kind":"noti');
+    setTimeout(() => {
+      res.write(
+        'fy","notification":{"kind":"approval","botId":"b1","botName":"Reviewer","threadId":"t1","title":"x","body":"rm -rf?"}}\n\n',
+      );
+      // hold the stream open; the notifier owns reconnects
+    }, 20);
+  });
+  servers.push(server);
+  const harnessPort = await new Promise<number>((r) => server.listen(0, "127.0.0.1", () => r((server.address() as any).port)));
+  const relayPort = await fakeRelay(received);
+  const notifier = startNotifier({
+    harnessPort,
+    relayUrl: `http://127.0.0.1:${relayPort}`,
+    pushTokens: () => ["ab".repeat(32)],
+  });
+  await expect.poll(() => received.length).toBe(1);
+  notifier.stop();
+  expect(received[0]).toEqual({ deviceTokens: ["ab".repeat(32)], kind: "approval", botName: "Reviewer" });
+});
+
+it("stops retrying once stop() is called, even with a retry timer pending", async () => {
+  let connections = 0;
+  const server = createServer((_req, res) => {
+    connections++;
+    res.destroy(); // kill the connection immediately, forcing a retry
+  });
+  servers.push(server);
+  const harnessPort = await new Promise<number>((r) => server.listen(0, "127.0.0.1", () => r((server.address() as any).port)));
+  const relayPort = await fakeRelay([]);
+  const notifier = startNotifier({
+    harnessPort,
+    relayUrl: `http://127.0.0.1:${relayPort}`,
+    pushTokens: () => [],
+    backoffMinMs: 20,
+  });
+  await expect.poll(() => connections).toBeGreaterThanOrEqual(1);
+  notifier.stop();
+  const countAtStop = connections;
+  // Longer than several backoff intervals — if stop() only stopped the
+  // in-flight request and not the pending retry timer, this would catch it.
+  await new Promise((r) => setTimeout(r, 300));
+  expect(connections).toBe(countAtStop);
+});

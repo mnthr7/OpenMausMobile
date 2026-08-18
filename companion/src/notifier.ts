@@ -16,14 +16,22 @@ export interface NotifierOptions {
   harnessPort: number;
   relayUrl: string;
   pushTokens: () => string[];
+  /** Floor for the reconnect backoff. Optional, and only ever set by tests —
+   * the default is the one that ships. */
+  backoffMinMs?: number;
 }
 
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 
-export function startNotifier({ harnessPort, relayUrl, pushTokens }: NotifierOptions): { stop(): void } {
+export function startNotifier({
+  harnessPort,
+  relayUrl,
+  pushTokens,
+  backoffMinMs = BACKOFF_MIN_MS,
+}: NotifierOptions): { stop(): void } {
   let stopped = false;
-  let backoff = BACKOFF_MIN_MS;
+  let backoff = backoffMinMs;
   let request: ReturnType<typeof get> | null = null;
 
   const deliver = (notification: HarnessNotification) => {
@@ -45,7 +53,16 @@ export function startNotifier({ harnessPort, relayUrl, pushTokens }: NotifierOpt
     request = get(
       { host: "127.0.0.1", port: harnessPort, path: "/api/events?screens=off" },
       (res) => {
-        backoff = BACKOFF_MIN_MS;
+        // A non-200 — the harness restarting, a proxy's 502 — is not a
+        // stream to read: draining it and going through retry() keeps the
+        // backoff growing, instead of resetting to the floor on every
+        // rejected connection and hammering a harness that is still down.
+        if (res.statusCode !== 200) {
+          res.resume();
+          retry();
+          return;
+        }
+        backoff = backoffMinMs;
         let buffer = "";
         res.on("data", (chunk: Buffer) => {
           buffer += chunk.toString("utf8");
