@@ -130,6 +130,10 @@ const companion = createServer(
     setPushToken: (id, token) => devices.setPushToken(id, token),
     redeem: (code, deviceName) => devices.redeem(code, deviceName),
     serverName: machineName,
+    // Headless boxes on small shared-cpu VMs need longer than the default:
+    // a driver-availability describe() runs `--version` plus auth probes
+    // whose cold starts alone can pass 30s. Headers only — SSE unaffected.
+    headersTimeoutMs: num(process.env.OMB_COMPANION_HEADERS_TIMEOUT_MS, 30_000),
   }),
 );
 
