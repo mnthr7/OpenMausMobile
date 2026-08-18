@@ -5,9 +5,42 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/app-icon.svg" />
     <title>OpenMausBot</title>
+    <style>
+      html, body, #root { height: 100%; margin: 0; background: #070707; color: #fcfcfc; font: 15px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+      #boot { display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; padding: 24px; }
+      #boot h2 { font-size: 18px; font-weight: 600; margin: 12px 0 0; }
+      #boot p { color: #fcfcfc99; max-width: 420px; margin: 8px auto 0; }
+      #boot code { color: #fcfcfc; background: #2f2f2f; padding: 1px 6px; border-radius: 6px; }
+      #boot-detail { margin-top: 16px; max-width: 520px; color: #ff5667; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; text-align: left; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot">
+        <div>
+          <div style="font-size: 40px">🐭</div>
+          <h2>Starting OpenMausBot…</h2>
+          <p>
+            If this never changes, the UI failed to load. In the repo run
+            <code>pnpm install</code> then <code>pnpm dev</code>, and open
+            <code>http://127.0.0.1:5199/</code> — not localhost.
+          </p>
+          <p id="boot-detail"></p>
+        </div>
+      </div>
+    </div>
+    <script>
+      function showBootError(msg) {
+        var el = document.getElementById("boot-detail");
+        if (el && msg) el.textContent = String(msg);
+      }
+      window.addEventListener("error", function (e) {
+        showBootError((e && e.message) || (e && e.error) || "Script error");
+      }, true);
+      window.addEventListener("unhandledrejection", function (e) {
+        showBootError(e && e.reason ? e.reason : "Unhandled promise rejection");
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

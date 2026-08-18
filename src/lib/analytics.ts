@@ -13,21 +13,30 @@ let ready = false;
 
 export function initAnalytics() {
   if (ready) return;
-  posthog.init(TOKEN, {
-    api_host: "https://us.i.posthog.com",
-    autocapture: false, // never capture clicked-element text (conversation leak)
-    capture_pageview: false, // single-window desktop app — no page routes
-    person_profiles: "identified_only",
-    persistence: "localStorage",
-  });
+  try {
+    posthog.init(TOKEN, {
+      api_host: "https://us.i.posthog.com",
+      autocapture: false, // never capture clicked-element text (conversation leak)
+      capture_pageview: false, // single-window desktop app — no page routes
+      person_profiles: "identified_only",
+      persistence: "localStorage",
+    });
+  } catch {
+    // a blocked tracker must not take the chat window with it
+    return;
+  }
   ready = true;
   const platform = navigator.userAgent.includes("Electron") ? "desktop" : "browser";
   // one-time install marker — app_first_open counts installs (the closest
   // truth to "downloads that mattered"; raw download counts live on the
   // GitHub release assets)
-  if (!localStorage.getItem("omb-installed")) {
-    localStorage.setItem("omb-installed", new Date().toISOString());
-    posthog.capture("app_first_open", { platform });
+  try {
+    if (!localStorage.getItem("omb-installed")) {
+      localStorage.setItem("omb-installed", new Date().toISOString());
+      posthog.capture("app_first_open", { platform });
+    }
+  } catch {
+    /* private mode / blocked storage */
   }
   posthog.capture("app_opened", { platform });
 }
@@ -46,8 +55,16 @@ export function identifyEmail(email: string) {
 // first-run email gate state
 const GATE_KEY = "omb-email-gate";
 export function emailGateDone(): boolean {
-  return Boolean(localStorage.getItem(GATE_KEY));
+  try {
+    return Boolean(localStorage.getItem(GATE_KEY));
+  } catch {
+    return true;
+  }
 }
 export function setEmailGateDone(status: "submitted" | "skipped") {
-  localStorage.setItem(GATE_KEY, status);
+  try {
+    localStorage.setItem(GATE_KEY, status);
+  } catch {
+    /* private mode / blocked storage */
+  }
 }

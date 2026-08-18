@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Loader2, Menu } from "lucide-react";
 import { StoreProvider, useStore } from "@/state/store";
 import { Onboarding } from "@/components/Onboarding";
@@ -10,12 +10,15 @@ import { SettingsPanel } from "@/components/SettingsPanel";
 import { PluginsPanel } from "@/components/PluginsPanel";
 import { ComputerPanel } from "@/components/ComputerPanel";
 import { InspectorPanel } from "@/components/InspectorPanel";
-import { SettingsModal } from "@/components/SettingsModal";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { DesktopCapabilitiesProvider } from "@/components/DesktopCapabilities";
 import { RoutinesPage } from "@/components/RoutinesPage";
 import { NoEngines } from "@/components/NoEngines";
 import { CommandPalette } from "@/components/CommandPalette";
+
+const SettingsModal = lazy(() =>
+  import("@/components/SettingsModal").then((module) => ({ default: module.SettingsModal })),
+);
 
 function Shell() {
   const { state, dispatch } = useStore();
@@ -130,7 +133,11 @@ function Shell() {
       {state.settingsOpen && bot && <SettingsPanel bot={bot} />}
       {state.computerOpen && bot && <ComputerPanel bot={bot} />}
       {state.inspectorOpen && bot && <InspectorPanel bot={bot} />}
-      {state.appSettingsOpen && <SettingsModal />}
+      {state.appSettingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsModal />
+        </Suspense>
+      )}
       {state.pluginsOpen && <PluginsPanel />}
       {/* mounted after the modals: same z-50 tier, so DOM order keeps the
           palette on top when one of them is open underneath */}
