@@ -36,6 +36,14 @@ export interface ProxyOptions {
     code: string,
     deviceName: unknown,
   ) => { token: string; device: unknown } | { error: string };
+  /** Redeem the single-use bootstrap secret a cloud workspace was created
+   * with. The phone's only way in when there is no keyboard to open a
+   * pairing window on — checked before the six-digit code, and never
+   * forwarded, for the same reason `redeem` is not. */
+  redeemBootstrap: (
+    secret: string,
+    deviceName: unknown,
+  ) => { token: string; device: unknown } | { error: string };
   /** What the phone should call this computer in its connection list. */
   serverName: () => string;
   /** How long the harness may take to produce response *headers*. Optional,
@@ -153,6 +161,15 @@ export function createProxyHandler(options: ProxyOptions) {
     if (method === "POST" && path === "/api/pair") {
       readJson(req).then(
         (body) => {
+          // Bootstrap first, and only when offered: a cloud workspace has no
+          // keyboard to open a pairing window on, so its phone sends the
+          // secret it was created with instead of a six-digit code. Anything
+          // else falls through to the code path below, untouched.
+          if (typeof body.bootstrap === "string") {
+            const result = options.redeemBootstrap(body.bootstrap, body.deviceName);
+            if ("error" in result) return sendJson(res, 403, { error: result.error });
+            return sendJson(res, 201, { ...result, serverName: options.serverName() });
+          }
           const result = options.redeem(String(body.code ?? ""), body.deviceName);
           if ("error" in result) return sendJson(res, 401, { error: result.error });
           return sendJson(res, 201, { ...result, serverName: options.serverName() });

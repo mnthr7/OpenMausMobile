@@ -104,7 +104,11 @@ async function refreshMachineName(): Promise<void> {
   }
 }
 
-const devices = new DeviceRegistry();
+// The bootstrap secret a cloud workspace was created with, if any. Undefined
+// (rather than an empty string) leaves `DeviceRegistry` with no bootstrap
+// path at all — a box started without this env var behaves exactly as it did
+// before this route existed.
+const devices = new DeviceRegistry(process.env.QURELAY_BOOTSTRAP_SECRET);
 const mdns = new MdnsResponder();
 
 /** The relay notifier, started only when a relay URL is configured — no
@@ -137,6 +141,7 @@ const companion = createServer(
     identify: (token) => devices.identify(token),
     setPushToken: (id, token) => devices.setPushToken(id, token),
     redeem: (code, deviceName) => devices.redeem(code, deviceName),
+    redeemBootstrap: (secret, deviceName) => devices.redeemBootstrap(secret, deviceName),
     serverName: machineName,
     // Headless boxes on small shared-cpu VMs need longer than the default:
     // a driver-availability describe() runs `--version` plus auth probes

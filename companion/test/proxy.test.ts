@@ -181,6 +181,7 @@ beforeAll(async () => {
         code === "424242"
           ? { token: TOKEN, device: { id: "d1", name: String(deviceName) } }
           : { error: "that code is not right" },
+      redeemBootstrap: () => ({ error: "no bootstrap configured" }),
       serverName: () => "Test computer",
     }),
   );
@@ -361,6 +362,7 @@ describe("the sidecar in front of an unmodified harness", () => {
         identify: () => "d1",
         setPushToken: () => true,
         redeem: () => ({ error: "no" }),
+        redeemBootstrap: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
     );
@@ -395,6 +397,7 @@ describe("the sidecar in front of an unmodified harness", () => {
         identify: () => "d1",
         setPushToken: () => true,
         redeem: () => ({ error: "no" }),
+        redeemBootstrap: () => ({ error: "no" }),
         serverName: () => "Test computer",
         // the shipped value is 30s; the behaviour under test is the same one
         headersTimeoutMs: 300,
@@ -448,6 +451,7 @@ describe("the sidecar in front of an unmodified harness", () => {
         identify: () => "d1",
         setPushToken: () => true,
         redeem: () => ({ error: "no" }),
+        redeemBootstrap: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
     );
@@ -509,6 +513,7 @@ describe("the sidecar in front of an unmodified harness", () => {
         identify: () => "d1",
         setPushToken: () => true,
         redeem: () => ({ error: "no" }),
+        redeemBootstrap: () => ({ error: "no" }),
         serverName: () => "Test computer",
       }),
     );
@@ -582,6 +587,7 @@ describe("pairing, end to end", () => {
         identify: (t) => registry.identify(t ?? undefined),
         setPushToken: (id, token) => registry.setPushToken(id, token),
         redeem: (code, deviceName) => registry.redeem(code, deviceName),
+        redeemBootstrap: (secret, deviceName) => registry.redeemBootstrap(secret, deviceName),
         serverName: () => "Ada's computer",
       }),
     );
@@ -663,6 +669,87 @@ describe("pairing, end to end", () => {
     } finally {
       await new Promise<void>((r) => paired.close(() => r()));
       await new Promise<void>((r) => control.close(() => r()));
+    }
+  });
+
+  // The bootstrap path a cloud workspace uses: no pairing window to open at
+  // all, because there is nobody at the keyboard to open one — just the
+  // secret the app was handed when the workspace was created.
+  it("pairs with a bootstrap secret and refuses the second attempt", async () => {
+    const { DeviceRegistry } = await import("../src/devices.ts");
+
+    const registry = new DeviceRegistry("boot-me");
+    const paired = createServer(
+      createProxyHandler({
+        harnessPort: HARNESS_PORT,
+        authenticate: (t) => Boolean(registry.authenticate(t ?? undefined)),
+        identify: (t) => registry.identify(t ?? undefined),
+        setPushToken: (id, token) => registry.setPushToken(id, token),
+        redeem: (code, deviceName) => registry.redeem(code, deviceName),
+        redeemBootstrap: (secret, deviceName) => registry.redeemBootstrap(secret, deviceName),
+        serverName: () => "Ada's computer",
+      }),
+    );
+    await new Promise<void>((r) => paired.listen(0, "127.0.0.1", r));
+    const port = (paired.address() as { port: number }).port;
+    const base = `http://127.0.0.1:${port}`;
+
+    try {
+      const body = JSON.stringify({ bootstrap: "boot-me", deviceName: "iPhone" });
+      const first = await fetch(`${base}/api/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(first.status).toBe(201);
+      const paired1 = (await first.json()) as { token: string };
+      expect(paired1.token).toMatch(/^omb_/);
+      expect(registry.identify(paired1.token)).not.toBeNull();
+
+      const second = await fetch(`${base}/api/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(second.status).toBe(403);
+    } finally {
+      await new Promise<void>((r) => paired.close(() => r()));
+    }
+  });
+
+  // The existing code path must be untouched by the bootstrap branch above
+  // it — this is the regression guard for it.
+  it("still pairs with a six-digit code when no bootstrap is offered", async () => {
+    const { DeviceRegistry } = await import("../src/devices.ts");
+
+    const registry = new DeviceRegistry();
+    const paired = createServer(
+      createProxyHandler({
+        harnessPort: HARNESS_PORT,
+        authenticate: (t) => Boolean(registry.authenticate(t ?? undefined)),
+        identify: (t) => registry.identify(t ?? undefined),
+        setPushToken: (id, token) => registry.setPushToken(id, token),
+        redeem: (code, deviceName) => registry.redeem(code, deviceName),
+        redeemBootstrap: (secret, deviceName) => registry.redeemBootstrap(secret, deviceName),
+        serverName: () => "Ada's computer",
+      }),
+    );
+    await new Promise<void>((r) => paired.listen(0, "127.0.0.1", r));
+    const port = (paired.address() as { port: number }).port;
+    const base = `http://127.0.0.1:${port}`;
+
+    try {
+      const opened = registry.openPairing();
+      const res = await fetch(`${base}/api/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: opened.code, deviceName: "laptop-paired" }),
+      });
+      expect(res.status).toBe(201);
+      const result = (await res.json()) as { token: string };
+      expect(result.token).toMatch(/^omb_/);
+    } finally {
+      await new Promise<void>((r) => paired.close(() => r()));
     }
   });
 

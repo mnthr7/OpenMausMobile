@@ -51,6 +51,7 @@ beforeAll(async () => {
       identify: (t) => (t === TOKEN ? "d1" : null),
       setPushToken: () => true,
       redeem: () => ({ error: "not used here" }),
+      redeemBootstrap: () => ({ error: "not used here" }),
       serverName: () => "Test computer",
     }),
   );

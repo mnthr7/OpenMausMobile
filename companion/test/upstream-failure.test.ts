@@ -43,6 +43,7 @@ const stand = async (harness: Server): Promise<string> => {
       identify: () => "d1",
       setPushToken: () => true,
       redeem: () => ({ error: "not in this test" }),
+      redeemBootstrap: () => ({ error: "not in this test" }),
       serverName: () => "Ada's computer",
     }),
   );
@@ -148,6 +149,7 @@ describe("an upstream that fails mid-stream", () => {
         identify: () => "d1",
         setPushToken: () => true,
         redeem: () => ({ error: "not in this test" }),
+      redeemBootstrap: () => ({ error: "not in this test" }),
         serverName: () => "Ada's computer",
       }),
     );

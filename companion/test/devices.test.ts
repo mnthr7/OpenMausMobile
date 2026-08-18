@@ -10,6 +10,7 @@ import {
   bearerToken,
   cleanDeviceName,
   DeviceRegistry,
+  MAX_DEVICES,
   MAX_PAIRING_ATTEMPTS,
   PAIRING_TTL_MS,
 } from "../src/devices.ts";
@@ -281,6 +282,55 @@ describe("a pairing that cannot be saved", () => {
     expect("error" in result).toBe(true);
     expect(registry.count()).toBe(0);
     expect(registry.list()).toEqual([]);
+  });
+});
+
+describe("bootstrap pairing", () => {
+  beforeEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  it("redeems a bootstrap secret exactly once", () => {
+    const registry = new DeviceRegistry("s3cret-bootstrap-value");
+    const first = registry.redeemBootstrap("s3cret-bootstrap-value", "iPhone");
+    if ("error" in first) throw new Error(first.error);
+    expect(first.token).toMatch(/^omb_/);
+    expect(registry.identify(first.token)).toBe(first.device.id);
+
+    const second = registry.redeemBootstrap("s3cret-bootstrap-value", "iPhone");
+    expect("error" in second).toBe(true);
+  });
+
+  it("refuses a wrong bootstrap secret without consuming the real one", () => {
+    const registry = new DeviceRegistry("s3cret-bootstrap-value");
+    expect("error" in registry.redeemBootstrap("wrong", "iPhone")).toBe(true);
+    expect("error" in registry.redeemBootstrap("s3cret-bootstrap-value", "iPhone")).toBe(false);
+  });
+
+  it("refuses every bootstrap when no secret is configured", () => {
+    const registry = new DeviceRegistry();
+    expect("error" in registry.redeemBootstrap("anything", "iPhone")).toBe(true);
+    expect("error" in registry.redeemBootstrap("", "iPhone")).toBe(true);
+  });
+
+  it("remembers that a bootstrap was spent across a reload", () => {
+    const first = new DeviceRegistry("s3cret-bootstrap-value");
+    expect("error" in first.redeemBootstrap("s3cret-bootstrap-value", "iPhone")).toBe(false);
+    const reloaded = new DeviceRegistry("s3cret-bootstrap-value");
+    expect("error" in reloaded.redeemBootstrap("s3cret-bootstrap-value", "iPad")).toBe(true);
+  });
+
+  it("does not mint a device when the fleet is already full", () => {
+    const registry = new DeviceRegistry("s3cret-bootstrap-value");
+    for (let i = 0; i < MAX_DEVICES; i++) {
+      const { code } = registry.openPairing();
+      const result = registry.redeem(code, `device-${i}`);
+      if ("error" in result) throw new Error(result.error);
+    }
+    expect(registry.count()).toBe(MAX_DEVICES);
+    const result = registry.redeemBootstrap("s3cret-bootstrap-value", "iPhone");
+    expect("error" in result).toBe(true);
+    expect(registry.count()).toBe(MAX_DEVICES);
   });
 });
 

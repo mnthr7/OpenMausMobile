@@ -120,6 +120,15 @@ export class DeviceRegistry {
   private devices: DeviceRecord[] = [];
   private window: PairingWindow | null = null;
   private lastSeenWrites = new Map<string, number>();
+  /** The bootstrap secret, if this sidecar was started with one. It is the
+   * phone's only way in: the pairing code lives on a loopback port that a
+   * cloud box has no way to expose, so a workspace created by the app injects
+   * one secret at create time and the app spends it on first connect. */
+  private bootstrapSecret: string | null;
+  /** Digests of every bootstrap secret ever redeemed. Spent-ness is
+   * persisted (as a digest, never the value) because the whole property is
+   * "once, ever" — a machine restart must not reopen the door. */
+  private spentBootstraps: string[] = [];
 
   /** Load the paired fleet, normalising as it goes.
    *
@@ -129,7 +138,8 @@ export class DeviceRegistry {
    * over: what a half-written or hand-edited file used to produce was a UI
    * saying "undefined", last seen "NaN min ago". Defaults are cheaper than
    * either dropping the device or teaching every reader to doubt the type. */
-  constructor() {
+  constructor(bootstrapSecret?: string) {
+    this.bootstrapSecret = bootstrapSecret?.trim() || null;
     try {
       const parsed = JSON.parse(readFileSync(DEVICES_FILE, "utf8"));
       if (Array.isArray(parsed?.devices)) {
@@ -141,6 +151,9 @@ export class DeviceRegistry {
           )
           .map(normalizeDevice);
       }
+      if (Array.isArray(parsed?.spentBootstraps)) {
+        this.spentBootstraps = parsed.spentBootstraps.filter((d: unknown): d is string => typeof d === "string");
+      }
     } catch {
       /* first run, or a file we can't read — start with no paired devices */
     }
@@ -150,7 +163,27 @@ export class DeviceRegistry {
    * would sign every phone out with no way to tell why. */
   private persist() {
     ensureDataDir();
-    writeFileAtomic(DEVICES_FILE, JSON.stringify({ devices: this.devices }, null, 2));
+    writeFileAtomic(
+      DEVICES_FILE,
+      JSON.stringify({ devices: this.devices, spentBootstraps: this.spentBootstraps }, null, 2),
+    );
+  }
+
+  /** Mint a fresh device record and token, without touching pairing or
+   * bootstrap state — the one place a token is generated, shared by both
+   * redemption paths. */
+  private mintDevice(name: string): { device: PublicDevice; token: string } {
+    const token = `omb_${randomBytes(32).toString("base64url")}`;
+    const device: DeviceRecord = {
+      id: randomUUID(),
+      name,
+      tokenHash: sha256(token),
+      createdAt: Date.now(),
+      lastSeenAt: Date.now(),
+    };
+    this.devices.push(device);
+    const { tokenHash, ...pub } = device;
+    return { device: pub, token };
   }
 
   /** Every paired device, without the hash — this is what the page renders. */
@@ -210,15 +243,7 @@ export class DeviceRegistry {
     if (this.devices.length >= MAX_DEVICES) return { error: "too many paired devices — remove one first" };
     this.closePairing();
 
-    const token = `omb_${randomBytes(32).toString("base64url")}`;
-    const device: DeviceRecord = {
-      id: randomUUID(),
-      name: cleanDeviceName(name),
-      tokenHash: sha256(token),
-      createdAt: Date.now(),
-      lastSeenAt: Date.now(),
-    };
-    this.devices.push(device);
+    const minted = this.mintDevice(cleanDeviceName(name));
     // Unlike the lastSeenAt write below, this one must not be swallowed. A
     // device that lives in memory but not on disk is paired until the next
     // restart and then silently is not — the phone keeps a token that stops
@@ -230,8 +255,42 @@ export class DeviceRegistry {
       this.devices.pop();
       return { error: `could not save the pairing: ${(e as Error).message}` };
     }
-    const { tokenHash, ...pub } = device;
-    return { device: pub, token };
+    return minted;
+  }
+
+  /** Redeem the single-use bootstrap secret this sidecar was started with,
+   * for a device token.
+   *
+   * This exists because the six-digit code above lives on a loopback control
+   * port that a cloud box has no way to expose to a phone. A workspace
+   * created by the app injects this secret as a machine secret at create
+   * time, and the app spends it here on first connect — once, ever. Compared
+   * in constant time, exactly as a bearer token is, since a wrong guess here
+   * is exactly as timing-sensitive as a wrong guess there. */
+  redeemBootstrap(secret: string, name: unknown): { device: PublicDevice; token: string } | { error: string } {
+    if (!this.bootstrapSecret) return { error: "this workspace has no bootstrap secret" };
+    if (typeof secret !== "string" || secret.length === 0) return { error: "bad bootstrap" };
+    const digest = sha256(secret);
+    if (!sameDigest(digest, sha256(this.bootstrapSecret))) return { error: "bad bootstrap" };
+    if (this.spentBootstraps.some((spent) => sameDigest(spent, digest))) {
+      return { error: "this bootstrap has already been used" };
+    }
+    if (this.devices.length >= MAX_DEVICES) return { error: "too many paired devices — remove one first" };
+
+    const minted = this.mintDevice(cleanDeviceName(name));
+    this.spentBootstraps.push(digest);
+    // As above: an unsaved registration is a device that stops working with
+    // nothing to explain why, and here that would also leave the secret
+    // usable again — the worse of the two failure modes this route exists to
+    // avoid. Roll both back together.
+    try {
+      this.persist();
+    } catch (e) {
+      this.devices.pop();
+      this.spentBootstraps.pop();
+      return { error: `could not save the pairing: ${(e as Error).message}` };
+    }
+    return minted;
   }
 
   /** Resolve a bearer token to its device, or null. */
