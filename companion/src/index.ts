@@ -40,6 +40,14 @@ const num = (value: string | undefined, fallback: number): number => {
   return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : fallback;
 };
 
+/** A duration in milliseconds from the environment, or the default. Bounded
+ * to 1s–10min: below that is a typo, above it a request nobody is waiting
+ * for. Distinct from `num`, whose port-range ceiling is far too low here. */
+const ms = (value: string | undefined, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1000 && parsed <= 600_000 ? parsed : fallback;
+};
+
 const HARNESS_PORT = num(process.env.OMB_PORT, 8799);
 const WEBHOOK_PORT = num(process.env.OMB_WEBHOOK_PORT, HARNESS_PORT + 1);
 const COMPANION_PORT = num(process.env.OMB_COMPANION_PORT, 8810);
@@ -133,7 +141,9 @@ const companion = createServer(
     // Headless boxes on small shared-cpu VMs need longer than the default:
     // a driver-availability describe() runs `--version` plus auth probes
     // whose cold starts alone can pass 30s. Headers only — SSE unaffected.
-    headersTimeoutMs: num(process.env.OMB_COMPANION_HEADERS_TIMEOUT_MS, 30_000),
+    // NOT num(): that helper validates ports and rejects values over 65535,
+    // which silently turned 90000 back into the default.
+    headersTimeoutMs: ms(process.env.OMB_COMPANION_HEADERS_TIMEOUT_MS, 30_000),
   }),
 );
 
