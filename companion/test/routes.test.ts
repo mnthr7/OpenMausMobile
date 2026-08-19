@@ -42,10 +42,37 @@ describe("what the app may do", () => {
     ["GET", "/api/threads/th_1/messages/msg_2/image"],
     ["POST", "/api/threads/th_1/respond"],
     ["PUT", "/api/push"],
+    ["DELETE", "/api/bots/bot_123"],
+    ["DELETE", "/api/groups/room-1"],
+    ["DELETE", "/api/bots/bot_123/tasks/th_1"],
   ];
 
   for (const [method, path] of calls) {
     it(`allows ${method} ${path}`, () => expect(ask(method, path)).toBeNull());
+  }
+});
+
+describe("deleting a bot, a room, or one conversation", () => {
+  // Destructive, and added to the allowlist after everything above it: a bot
+  // delete interrupts a running turn and destroys the transcript, a room
+  // delete takes its logs with it, a task delete drops one conversation.
+  // Each needs both halves proven — a paired device gets through, and an
+  // unpaired one still gets the credential refusal, not a preview of
+  // whether the route exists.
+  const deletes: Array<[string, string]> = [
+    ["DELETE", "/api/bots/bot_123"],
+    ["DELETE", "/api/groups/room-1"],
+    ["DELETE", "/api/bots/bot_123/tasks/th_1"],
+  ];
+
+  for (const [method, path] of deletes) {
+    it(`allows ${method} ${path} for a paired device`, () => {
+      expect(ask(method, path)).toBeNull();
+    });
+
+    it(`still refuses ${method} ${path} to an unpaired device`, () => {
+      expect(ask(method, path, false)?.status).toBe(401);
+    });
   }
 });
 
@@ -84,11 +111,12 @@ describe("what it may not", () => {
   // and deleting a bot are the same path.
   it("allows a path only for the methods it was allowed for", () => {
     expect(allowed("GET", "/api/bots")).toBe(true);
-    expect(allowed("DELETE", "/api/bots/bot_123")).toBe(false);
+    expect(allowed("DELETE", "/api/bots")).toBe(false);
     expect(allowed("POST", "/api/threads/th_1/messages")).toBe(false);
     expect(allowed("GET", "/api/groups/room-1")).toBe(false);
     expect(allowed("GET", "/api/push")).toBe(false);
     expect(allowed("POST", "/api/push")).toBe(false);
+    expect(allowed("GET", "/api/bots/bot_123/tasks/th_1")).toBe(false);
   });
 
   // Patterns are anchored, so a path that merely starts right is still a

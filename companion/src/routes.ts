@@ -68,6 +68,16 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
 
   // this device's own push registration; handled by the sidecar, never forwarded
   { method: "PUT", path: /^\/api\/push$/ },
+
+  // destructive: deletes a bot outright — interrupts any running turn, stops
+  // its screen poller, disables its routines. No undo.
+  { method: "DELETE", path: /^\/api\/bots\/[\w-]+$/ },
+  // destructive: deletes a room and its event/native logs. No undo.
+  { method: "DELETE", path: /^\/api\/groups\/[\w-]+$/ },
+  // destructive: deletes one conversation — its thread, transcript and
+  // provider session. The harness itself refuses to run a task or empty a
+  // bot, so this is safe to expose as-is. No undo.
+  { method: "DELETE", path: /^\/api\/bots\/[\w-]+\/tasks\/[\w-]+$/ },
 ];
 
 /** Route families worth naming in the refusal.
